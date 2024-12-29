@@ -156,7 +156,11 @@ class LLaMA:
 
         self._tokenizer = AutoTokenizer.from_pretrained(vocab_path)
         self._tokenizer.bos_token_id = self._config.get("bos_token_id", None) or 1
-        self._tokenizer.eos_token_id = self._config.get("eos_token_id", None) or 2
+        conf_eos_token_id = self._config.get("eos_token_id", None)
+        if isinstance(conf_eos_token_id, int):
+             self._tokenizer.eos_token_id = conf_eos_token_id
+        elif self._tokenizer.eos_token_id is None:
+            self._tokenizer.eos_token_id = 2
         tokenizer_config_path = f"{vocab_path}/tokenizer_config.json"
         if os.path.exists(tokenizer_config_path):
             self.tokenizer_config = json.load(open(tokenizer_config_path))
