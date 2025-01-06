@@ -635,6 +635,7 @@ void Attention::impl::NormalImpl::attn_search_rag(
         quant_v = int8_op::quant_calc_scale(ctx, h_v_s, 127, 128);
     }
     int layer = ctx.current_layer();
+    auto gc_stopper = std::make_unique<core::GCStopper>(ctx); // Stop gc to make sure buffer k/v address's are valid
     Tensor buf_k_addr = rag_buffer->buf_k_addr(ctx, layer); // (batch) => (num_kv_heads, len_buf, dim_head)
     Tensor buf_v_addr = rag_buffer->buf_v_addr(ctx, layer); // (batch) => (num_kv_heads, len_buf, dim_head)
     Tensor scale_k_addr = rag_buffer->scale_k_addr(ctx, layer);
@@ -716,6 +717,7 @@ void Attention::impl::NormalImpl::attn_search_rag(
 //        }
         return;
     }
+    gc_stopper.reset();
 
     auto h_q_t = transpose_q(ctx, h_q, len_q, event_level)
         .view({ batch, num_kv_heads, num_head_groups * len_q, dim_head });

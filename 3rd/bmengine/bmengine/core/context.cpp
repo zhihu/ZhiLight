@@ -509,9 +509,11 @@ Context::~Context() { }
 Context::Context(Context&&) = default;
 
 void Context::alloc_device(int idx) const {
+//    std::cout << "thread " << _get_tid() << " use device " << idx << endl;
     pimpl->use_device(idx);
 }
 void Context::release_device() const {
+//    std::cout << "thread " << _get_tid() << " release_device " << endl;
     pimpl->release_device();
 }
 bool Context::switch_to_device(int idx) const {
@@ -519,11 +521,13 @@ bool Context::switch_to_device(int idx) const {
         return false;
     }
     pimpl->check_in_same_thread();
+//    std::cout << "thread " << _get_tid() << " switch device from " << pimpl->active_device << " to " << idx << endl;
     if (pimpl->debug >= 2) {
         std::cerr << "Switch device from " << pimpl->active_device << " to " << idx
                   << std::endl;
     }
     if (pimpl->active_device != -1) {
+        std::cout << "WARNING active_device != -1\n";
         BM_CUDART_ASSERT(cudaStreamSynchronize(current_stream()->ptr));
         pimpl->release_device();
     }
@@ -856,6 +860,13 @@ void Context::mem_gc() {
     BM_ASSERT_EQ(1, pimpl->devices.size() == 1, "TP only");
     pimpl->allocators[0]->defragmentation();
 }
-} // namespace core
 
+GCStopper::GCStopper(const Context& ctx) : ctx(ctx) {
+    ctx.get_allocator()->set_allow_gc(false);
+}
+GCStopper::~GCStopper() {
+    ctx.get_allocator()->set_allow_gc(true);
+}
+
+} // namespace core
 } // namespace bmengine

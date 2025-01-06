@@ -215,6 +215,10 @@ Memory MemoryAllocator::alloc(size_t num_bytes, size_t round_up_bytes) {
         return new_mem(mems.size(), convert_voidp(last_ptr), num_bytes);
     }
 
+    if (!allow_gc_) {
+        throw std::runtime_error("GC is disabled");
+    }
+
     void* ptr = defragmentation();
     BM_ASSERT(convert_uint(ptr) + num_bytes <= convert_uint(end_ptr),
               logger::str_cat("Exceeded memory_limit:", memory_limit / 1024 / 1024, "MB"));
