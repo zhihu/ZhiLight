@@ -140,7 +140,8 @@ public:
     shared_ptr<BatchGenerator> searcher_;
 
     static shared_ptr<PyBatchGenerator> create(DynBatchConfig& config, PyModelBase* py_model) {
-        // std::cerr << "py_model->model()->layer_type() " << py_model->model()->layer_type() << "\n";
+        if (!py_model->is_loaded()) throw std::runtime_error("Model is not loaded!!!");
+
         shared_ptr<PyBatchGenerator> self = std::make_shared<PyBatchGenerator>();
         self->searcher_ = std::make_shared<BatchGenerator>(
             config, py_model->par_models(), py_model->engine());

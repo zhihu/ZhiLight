@@ -38,7 +38,7 @@ class Qwen2Adapter:
             if get_quant_method(config) == "awq":
                 set_env("AWQ_USE_EXLLAMA", 1)
 
-        if "rope_scaling" in config:
+        if config.get("rope_scaling", None):
             if "factor" in config["rope_scaling"] and config["rope_scaling"]["factor"] > 1.:
                 if os.environ.get("DISABLE_ROPE_SCALING", "") == "1":
                     config.pop("rope_scaling")

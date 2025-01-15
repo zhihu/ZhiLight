@@ -160,6 +160,7 @@ public:
     }
 
     py::array get_input_embeddings(py::list data_list) {
+        if (!loaded_) throw std::runtime_error("Model is not loaded!!!");
         std::vector<int> h_ids = bind::to_int_vector(data_list);
         py::array_t<float> out_emb({h_ids.size(), size_t(models_[0]->dim_model)});
         std::map<std::string, std::vector<float>> map;

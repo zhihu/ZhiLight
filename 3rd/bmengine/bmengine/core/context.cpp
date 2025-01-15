@@ -695,12 +695,11 @@ void Context::load_parameter(
     auto it = state_dict.find(name);
     BM_ASSERT(it != state_dict.end(), "param " + name + " not found in state_dict");
     auto& param = it->second;
-    BM_ASSERT_EQ(weight->numel(), param.numel(), name + " shape mismatch");
     static bool print_param = std::getenv("PRINT_LOAD_PARAM") != nullptr;
     if (print_param) {
         std::cout << "Load " << name << ", shape=" << weight->shape() << ", srcShape=" << param.shape() << endl;
     }
-    BM_ASSERT_EQ(weight->shape(), param.shape(), "shape mismatch");
+    BM_ASSERT_EQ(weight->shape(), param.shape(), name +" shape mismatch");
 //    if (get_compute_capability() == 80) {
 //        if (rank() == 0)
 //            assign_or_copy(weight, &param);

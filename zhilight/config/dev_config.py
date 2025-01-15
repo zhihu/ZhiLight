@@ -26,6 +26,12 @@ CHUNKED_PREFILL_SIZE = "CHUNKED_PREFILL_SIZE"
 
 """ KV Cache """
 PRE_ALLOC_ALL_TOKEN = "PRE_ALLOC_ALL_TOKEN"
+LATENT_CACHE = "LATENT_CACHE"  # for MLA
+
+""" Memory """
+RESERVE_MEM_MB = "RESERVE_MEM_MB"  # Reserve GPU memory NOT used by ZhiLight
+
+ROPE_CACHE = "ROPE_CACHE"
 
 
 def get_int_env(name, default=0):
@@ -36,6 +42,11 @@ def set_env(name, value, tip=''):
     if name not in os.environ:
         print(f"### Auto Set dev env: {name}={value} {tip}")
         os.environ[name] = str(value)
+
+
+def set_env_kv(**kwargs):
+    for k, v in kwargs.items():
+        set_env(k, str(v))
 
 
 def set_envs(env_dict: dict):
