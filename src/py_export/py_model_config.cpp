@@ -80,7 +80,7 @@ model::ModelConfig pydict_to_model_config(py::dict& cfg) {
     model::ModelConfig config{ model_type, num_layers, dim_model, num_heads, dim_head, dim_ff, vocab_size,
              eps, num_kv_heads, data_type };
 
-    config.activate_fn = get_attr(cfg, "activate_fn", get_attr<std::string>(cfg, "hidden_act", "silu"));
+    config.activate_fn = get_attr(cfg, "activate_fn", get_attr<std::string>(cfg, "hidden_act", std::string("silu")));
     BM_ASSERT(config.activate_fn == "silu" || config.activate_fn == "gelu", "Unsupported activate_fn");
 
     // CPM deprecated
@@ -116,6 +116,12 @@ model::ModelConfig pydict_to_model_config(py::dict& cfg) {
     set_attr(cfg, "norm_topk_prob", config.norm_topk_prob);
     set_attr(cfg, "first_k_dense_replace", config.first_k_dense_replace);
     set_attr(cfg, "routed_scaling_factor", config.routed_scaling_factor);
+    int n_shared_experts = 0;
+    set_attr(cfg, "n_shared_experts", n_shared_experts);
+    if (n_shared_experts > 0 && config.shared_expert_intermediate_size <= 0) {
+        config.shared_expert_intermediate_size = n_shared_experts * config.moe_intermediate_size;
+    }
+
     // MOE of DeepSeek
     set_attr(cfg, "n_group", config.moe_n_group);
     set_attr(cfg, "topk_group", config.moe_topk_group);

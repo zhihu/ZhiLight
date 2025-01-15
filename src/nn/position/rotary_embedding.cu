@@ -125,6 +125,8 @@ static __global__ void KERNEL_rope_with_cache(
     } else {
         t = float(in[src_offset]) * cos_freq + float(in[src_offset - half_dim]) * sin_freq;
     }
+    if (in == g_out)
+        __syncthreads();
     g_out[dst_offset] = t;
 }
 
@@ -300,6 +302,23 @@ public:
             BM_CUDART_ASSERT(cudaGetLastError());
         }
     }
+
+    void rotate_inplace(
+        const core::Context& ctx,
+        const core::Tensor& pos, // (batch, seq_len)
+        core::Tensor& q          // (batch, seq_len, dim_model)
+    ) override {
+        auto m_ctx = model::ModelContext::cast(ctx);
+        if (m_ctx && m_ctx->dyn_batch() && m_ctx->dyn_batch()->rope_cache.cos.numel() > 0) {
+            auto& cos = m_ctx->dyn_batch()->rope_cache.cos;
+            auto& sin = m_ctx->dyn_batch()->rope_cache.sin;
+            Tensor out = q;
+            rotate_with_cache(ctx, cos, sin, q, out);
+        } else {
+            throw std::runtime_error("rotate_inplace is not supported in NormalImpl");
+        }
+    }
+
 
     Tensor rotate(
         const core::Context& ctx,
