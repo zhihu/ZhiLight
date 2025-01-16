@@ -89,7 +89,7 @@ class GeneratorArg:
             self,
             beam_size: int = 1,
             max_length: int = 100,
-            repetition_penalty: float = 1.05,
+            repetition_penalty: float = 1.0,
             ngram_penalty: float = 1.0,
             seed: int = 0,
             temperature: float = 1.0,
@@ -344,28 +344,20 @@ class DynamicBatchGenerator:
     def __init__(self, config: DynamicBatchConfig, model):
         self.config = config
         self.model = model
-        model = model._base if hasattr(model, "_base") else model
         self.c_model = model._model
         self._tokenizer = model._tokenizer if hasattr(model, "_tokenizer") else None
-        self._is_llama = 'llama' in model.__class__.__name__.lower()
-        self._is_bee = 'CPMBee' in model.__class__.__name__
-        if self._is_bee:
-            self.config.bos_id = 0
-            self.config.eos_id = 1
-        elif self._is_llama:
-            # self.config.eos_id = 2
-            self.config.bos_id = self._tokenizer.bos_token_id
-            self.config.eos_id = self._tokenizer.eos_token_id
-            if hasattr(model, "tokenizer_config"):
-                tokenizer_cfg: dict = model.tokenizer_config
-                if "chat_template" in tokenizer_cfg and "eos_token" in tokenizer_cfg and \
-                        tokenizer_cfg["eos_token"] != "</s>" and \
-                        "added_tokens_decoder" in tokenizer_cfg:
-                    chat_eos_token = tokenizer_cfg["eos_token"]
-                    for token_id, added_tokens in tokenizer_cfg["added_tokens_decoder"].items():
-                        if chat_eos_token == added_tokens["content"]:
-                            self.config.eos_id = int(token_id)
-                            print(f"Set chat model eos_id to {token_id}")
+        self.config.bos_id = self._tokenizer.bos_token_id
+        self.config.eos_id = self._tokenizer.eos_token_id
+        if hasattr(model, "tokenizer_config"):
+            tokenizer_cfg: dict = model.tokenizer_config
+            if "chat_template" in tokenizer_cfg and "eos_token" in tokenizer_cfg and \
+                    tokenizer_cfg["eos_token"] != "</s>" and \
+                    "added_tokens_decoder" in tokenizer_cfg:
+                chat_eos_token = tokenizer_cfg["eos_token"]
+                for token_id, added_tokens in tokenizer_cfg["added_tokens_decoder"].items():
+                    if chat_eos_token == added_tokens["content"]:
+                        self.config.eos_id = int(token_id)
+                        print(f"Set chat model eos_id to {token_id}")
 
         model_config = model._config if hasattr(model, "_config") and isinstance(model._config, dict) else {}
         max_token = model_config.get("max_token", 4096)
@@ -555,9 +547,6 @@ class DynamicBatchGenerator:
             # batch_input = [x[:max_in_lengths] for x in batch_input]
 
         args = arg if isinstance(arg, list) else [arg.copy() for _ in input_list]
-        if self._is_bee:
-            for d, arg in zip(input_list, args):
-                arg.bee_answer_multi_span = not ("<ans>" in d and isinstance(d["<ans>"], str))
 
         batch_result = self.batch_generate_c(batch_input, args, max_lengths=max_out_lengths)
 

@@ -31,6 +31,7 @@ class RotaryEmbedding : public core::Layer {
     );
 
     bool is_normal() const;
+    bool is_neox_style() const;
 };
 
 // fuse kernel for attention
@@ -59,6 +60,7 @@ void rope_qk_cache(
     size_t num_heads,
     size_t num_kv_heads,
     size_t dim_head,
-    core::DataType dtype
+    core::DataType dtype,
+    bool neox_style
 );
 }

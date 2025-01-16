@@ -10,7 +10,6 @@ from torch import cuda
 
 try:
     from deepseek_vl2.models import DeepseekVLV2ForCausalLM, DeepseekVLV2Processor
-    from deepseek_vl2.serve.app_modules.utils import parse_ref_bbox
 except Exception as e:
     if "deepseek_vl2" in str(e):
         print(e)
@@ -23,6 +22,7 @@ import PIL.Image
 from transformers import AutoModelForCausalLM, AutoConfig
 from typing import List, Dict, Optional, Union
 from zhilight.config.dev_config import *
+from zhilight.config.deepseek_adapter import DeepseekV2Adapter
 from zhilight.llama import LLaMA, LLaMAModelConfig, QuantConfig, DistConfig
 from zhilight.loader import LLaMALoader
 
@@ -99,18 +99,12 @@ class DeepseekVL2(LLaMA):
         cuda.set_per_process_memory_fraction(torch_allow / total_memory)
         print(f"cuda.set_per_process_memory_fraction({torch_allow / total_memory})")
         set_env(RESERVE_MEM_MB, int(torch_allow / 1024000) + 1500)
-        set_env(LATENT_CACHE, 1)
-        set_env(ROPE_CACHE, 1)
 
         self._init_processor(model_path, None)
 
         # Init language model
-        language_config: dict = model_config["language_config"]
         language_config: dict = self.vl_gpt.config.language_config.to_dict()
-        # n_shared_experts = language_config.get("n_shared_experts", 0)
-        if language_config.get("norm_topk_prob", None) is None:
-            language_config["norm_topk_prob"] = False
-        print(f'norm {language_config["norm_topk_prob"]}')
+        DeepseekV2Adapter.adapt(language_config)
         super().__init__(
             model_path,
             model_config=language_config,

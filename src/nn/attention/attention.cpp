@@ -100,7 +100,7 @@ public:
           gemm_score_v(ctx, dtype, false, false),
           transpose(ctx),
           flash_decoding(ctx) {
-        if (cfg.model_type == "qwen2" || cfg.model_type == "qwen2_moe") {
+        if (cfg.model_type == "qwen2" || cfg.model_type == "qwen2_moe" || cfg.model_type == "qwen2_vl") {
             project_q.set_has_bias(true);
             project_k.set_has_bias(true);
             project_v.set_has_bias(true);
@@ -821,8 +821,9 @@ Tensor Attention::impl::NormalImpl::dynamic_batch_forward(
                           dyn_batch->rope_cache.sin,
                           a,
                           g_h_q, g_h_k, g_h_v,
-                          num_heads, num_kv_heads, dim_head, dtype);
-        } else if (rotary_embedding.is_normal()) {
+                          num_heads, num_kv_heads, dim_head, dtype,
+                          rotary_embedding.is_neox_style());
+        } else if (rotary_embedding.is_normal() && rotary_embedding.is_neox_style()) {
         rotary_embedding_qk(ctx, position_bias, a, g_h_q, g_h_k, g_h_v, num_heads, num_kv_heads, dim_head, rope_theta, dtype);
         } else {
             // if (ctx.is_layer(1)) std::cout << "Split to rotary_embedding\n";

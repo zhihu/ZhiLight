@@ -53,7 +53,3 @@ def set_envs(env_dict: dict):
     for k, v in env_dict.items():
         set_env(k, v)
 
-
-def get_quant_method(model_config: dict):
-    quant_cfg = model_config.get("quantization_config", {})
-    return quant_cfg.get("quant_method") if quant_cfg else None

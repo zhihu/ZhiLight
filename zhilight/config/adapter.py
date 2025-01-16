@@ -2,8 +2,10 @@
 # Author: spetrel@gmail.com
 
 from .dev_config import *
-from .qwen2_adapter import Qwen2Adapter
+# Keep in alphabetical order
 from .cohere_adapter import CohereAdapter
+from .deepseek_adapter import DeepseekV2Adapter
+from .qwen2_adapter import Qwen2Adapter
 
 
 def _get_model_type(config: dict):
@@ -21,10 +23,14 @@ class ModelAdapter:
     @staticmethod
     def adapt(config: dict):
         model_type = config.get("model_type", "")
-        if model_type == "qwen2":
-            Qwen2Adapter.adapt(config)
-        elif model_type == "cohere":
+
+        # Keep in alphabetical order
+        if model_type == "cohere":
             CohereAdapter.adapt(config)
+        elif model_type == "deepseek_v2":
+            DeepseekV2Adapter.adapt(config)
+        elif model_type == "qwen2":
+            Qwen2Adapter.adapt(config)
 
         if get_int_env(CHUNKED_PREFILL) == 1:
             set_env("DUAL_STREAM_THRESHOLD", 100)

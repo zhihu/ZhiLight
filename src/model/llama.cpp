@@ -91,7 +91,7 @@ core::Tensor LLaMA::encode(
     }
     if (rope_preparer && ctx.dyn_batch()) {
         auto& rope_cache = ctx.dyn_batch()->rope_cache;
-        std::tie(rope_cache.cos, rope_cache.sin) = rope_preparer->forward(ctx, pos_ids);
+        std::tie(rope_cache.cos, rope_cache.sin) = rope_preparer->forward(ctx, ids, pos_ids);
     }
     bool dual_stream = utils::get_int_env("DUAL_STREAM", 0) > 0 && ctx.world_size() > 1;
     int dual_stream_thres = utils::get_int_env("DUAL_STREAM_THRESHOLD", 1024);

@@ -17,6 +17,7 @@ class RopePreparer : public core::Layer {
     // return cos, sin
     std::tuple<core::Tensor, core::Tensor> forward(
         const core::Context& ctx,
+        const core::Tensor& tokens,      // (seq_len)
         const core::Tensor& position_ids // (seq_len)
     );
 };

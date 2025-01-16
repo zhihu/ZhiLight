@@ -63,6 +63,11 @@ void pydict_to_rope_config(const py::dict& d, model::RopeConfig& config) {
     set_attr(d, "mscale", config.mscale);
     set_attr(d, "mscale_all_dim", config.mscale_all_dim);
     set_attr(d, "original_max_position_embeddings", config.original_max_position);
+    set_attr(d, "neox_style", config.neox_style);
+    if (d.contains("mrope_section")) {
+        py::list sec_list = d["mrope_section"].cast<py::list>();
+        config.section = to_int_vector(sec_list);
+    }
 }
 
 model::ModelConfig pydict_to_model_config(py::dict& cfg) {

@@ -2,6 +2,9 @@
 
 ✨ __ZhiLight__ ✨is a highly optimized LLM inference engine developed by Zhihu and ModelBest Inc. The "Zhi" in its name stands for **Z**hihu. ZhiLight can accelerate the inference of models like Llama and its variants, especially on PCIe-based GPUs. Compared to mainstream open-source inference engines, for example, vllm, it has significant performance advantages.
 
+## News 🔥
+* [2025/01] Support [DeepSeek-VL2](https://github.com/deepseek-ai/DeepSeek-VL2) multimodal models: deepseek-vl2-tiny, deepseek-vl2-small, deepseek-vl2.
+
 ## 🎉🎉 Main Features
 
 * Asynchronous OpenAI compatible interface adapted from vllm

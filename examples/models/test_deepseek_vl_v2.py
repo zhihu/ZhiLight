@@ -6,7 +6,7 @@ import time
 from common_args import *
 from zhilight.dynamic_batch import DynamicBatchConfig, GeneratorArg, DynamicBatchGenerator
 from zhilight.models.auto_model import AutoModel
-from zhilight.models.deepseek_vl_v2 import DeepseekVL2
+from zhilight.models.deepseek_vl_v2 import DeepseekVL2, load_pil_images
 # pip install xformers==0.0.28 torchvision==0.19.1 torch==2.4.1 mdtex2html gradio
 
 parser = define_parser()
@@ -64,7 +64,24 @@ else:
 config: DynamicBatchConfig = generator_config_from_cmd(args)
 gen_arg: GeneratorArg = generator_arg_from_cmd(args)
 
+
+def save_answer_image(messages, answer):
+    if '<|ref|>' in answer and '<|det|>' in answer:
+        print(f"Try save answer image...")
+        pil_images = load_pil_images(messages)
+
+        cwd = os.getcwd()
+        import deepseek_vl2
+        os.chdir(os.path.dirname(deepseek_vl2.__file__) + "/..")  # To found font for parse_ref_bbox
+        from deepseek_vl2.serve.app_modules.utils import parse_ref_bbox
+        vg_image = parse_ref_bbox(answer, image=pil_images[-1])
+        os.chdir(cwd)
+
+        vg_image.save("./vg.jpg", format="JPEG", quality=85)
+
+
 with DynamicBatchGenerator(config, model) as generator:
     for _ in range(args.round):
         req_result = generator.generate(messages, gen_arg)
         print(req_result)
+        save_answer_image(messages, req_result.outputs[0].text)

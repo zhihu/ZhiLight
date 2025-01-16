@@ -60,7 +60,8 @@ public:
           rope_theta(cfg.rope_theta),
           type(cfg.rope_cfg.type),
           scaling_factor(cfg.rope_cfg.factor),
-          max_position_embeddings(cfg.max_position_embeddings) {
+          max_position_embeddings(cfg.max_position_embeddings),
+          neox_style(cfg.rope_cfg.neox_style) {
         if (cfg.qk_rope_head_dim > 0)
             dim_head = cfg.qk_rope_head_dim;
     }
@@ -111,6 +112,7 @@ RopePreparer::~RopePreparer() { }
 
 std::tuple<core::Tensor, core::Tensor> RopePreparer::forward(
     const core::Context& ctx,
+    const core::Tensor& tokens,
     const core::Tensor& pos // (seq_len)
 ) {
     core::EventScope ev(ctx, "RopePreparer", 3);
