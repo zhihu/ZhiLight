@@ -15,6 +15,9 @@ struct RopeConfig {
     float mscale { 0 };
     float mscale_all_dim { 0 };
     int original_max_position { 0 };
+
+    bool neox_style { true };
+    std::vector<int> section;
 };
 
 struct ModelConfig {

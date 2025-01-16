@@ -2,6 +2,7 @@
 // Author: spetrel@gmail.com
 
 #include "rotary_embedding.h"
+#include "rope_common.cuh"
 #include <bmengine/core/core.h>
 #include <bmengine/functions/utils.cuh>
 #include <bmengine/functions/reduce.cuh>
@@ -30,7 +31,8 @@ static __global__ void KERNEL_rope_qk_with_cache(
     int num_heads,
     int num_kv_heads,
     int dim_head,
-    float rope_theta) {
+    float rope_theta,
+    bool neox_style) {
     const int head = blockIdx.y;
     int col = threadIdx.x;
     int half_dim = dim_head / 2;
@@ -46,12 +48,7 @@ static __global__ void KERNEL_rope_qk_with_cache(
 
     float cos_freq = g_cos[blockIdx.x * dim_head + col];
     float sin_freq = g_sin[blockIdx.x * dim_head + col];
-    float t;
-    if (col < half_dim) {
-        t = float(in[offset]) * cos_freq - float(in[offset + half_dim]) * sin_freq;
-    } else {
-        t = float(in[offset]) * cos_freq + float(in[offset - half_dim]) * sin_freq;
-    }
+    float t = rope_one_value(in, offset, cos_freq, sin_freq, col, half_dim, neox_style);
 
     if (head >= num_heads) {
         // k
@@ -76,9 +73,11 @@ void rope_qk_cache(
     size_t num_heads,
     size_t num_kv_heads,
     size_t dim_head,
-    core::DataType dtype) {
+    core::DataType dtype,
+    bool neox_style) {
     size_t seq_len = in.size(0);
     BM_ASSERT_EQ(cos.size(0), in.size(0), "batch mismatch");
+    BM_ASSERT_LT(in.numel(), INT_MAX, "number bigger than INT_MAX");
 
     out_q = ctx.tensor({seq_len, num_heads * dim_head}, dtype);
     out_k = ctx.tensor({seq_len, num_kv_heads * dim_head}, dtype);
@@ -101,7 +100,8 @@ void rope_qk_cache(
                 num_heads,
                 num_kv_heads,
                 dim_head,
-                rope_theta);
+                rope_theta,
+                neox_style);
         });
     } else {
         BM_ASSERT_EQ(in.dtype(), dtype, "");
@@ -117,7 +117,8 @@ void rope_qk_cache(
                 num_heads,
                 num_kv_heads,
                 dim_head,
-                rope_theta);
+                rope_theta,
+                neox_style);
         });
     }
     BM_CUDART_ASSERT(cudaGetLastError());

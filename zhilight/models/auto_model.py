@@ -6,10 +6,12 @@ import importlib
 from zhilight.loader import LLaMALoader
 from zhilight.llama import LLaMA
 
+# Keep in alphabetical order
 _CUSTOMIZED_MODELS = {
     "deepseek_vl_v2": "DeepseekVL2",
 }
 
+# Keep in alphabetical order
 _TEXT_MODEL_TYPES = [
     "cohere",
     "deepseek_v2",
