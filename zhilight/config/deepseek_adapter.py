@@ -9,4 +9,5 @@ class DeepseekV2Adapter:
     def adapt(config: dict):
         set_env(LATENT_CACHE, 1)
         set_default(config, "norm_topk_prob", False)
-        set_neox_style(config, False)
+        if config.get("use_mla", True):
+            set_neox_style(config, False)
