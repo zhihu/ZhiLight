@@ -22,34 +22,30 @@ class PyLinear : public PyLayerBase<nn::Linear> {
 
 public:
     PyLinear(
-        int dim_model,
-        int dim_ff,
-        std::string act_fn_type,
+        int dim_in,
+        int dim_out,
+        std::string activation,
         int quant,
-        bool scale,
-        bool weight_transposed,
         std::string& dtype_name)
         : PyLayerBase<nn::Linear>(
-            dim_model,
-            dim_ff,
-            act_fn_type,
+            dim_in,
+            dim_out,
+            activation,
             quant,
-            scale,
-            weight_transposed,
+            false,
+            false,
             false,
             core::DistLayout::COLUMNAR,
             core::name_to_data_type(dtype_name)) { }
 
     static PyLinear create(
-        int dim_model,
-        int dim_ff,
-        std::string act_fn_type,
+        int dim_in,
+        int dim_out,
+        std::string activation,
         int quant,
-        bool scale = false,
-        bool weight_transposed = false,
         std::string dtype_name = "half") {
         auto ff =
-            PyLinear(dim_model, dim_ff, act_fn_type, quant, scale, weight_transposed, dtype_name);
+            PyLinear(dim_in, dim_out, activation, quant, dtype_name);
         return ff;
     }
 

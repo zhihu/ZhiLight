@@ -17,7 +17,6 @@ class Linear(torch.nn.Module):
         dtype: torch.dtype = torch.half,
         init_mean: float = 0.0,
         init_std: float = 1,
-        scale_before: bool = True,
     ):
         super().__init__()
         self.dim_in = self.in_features = dim_in
@@ -26,7 +25,6 @@ class Linear(torch.nn.Module):
         self.weight = torch.nn.parameter.Parameter(
             torch.empty((dim_out, dim_in), dtype=dtype)
         )
-        self.scale_before = scale_before
         if act_fn_type.lower() == "gelu":
             self.act = torch.nn.GELU()
         elif act_fn_type.lower() == "silu":
@@ -40,11 +38,7 @@ class Linear(torch.nn.Module):
         Returns:
             :obj:`torch.Tensor` of shape ``(batch, seq_len, dim_out)``: The output of the linear transform y.
         """  # noqa: E501
-        if self.scale_before:
-            x = x / math.sqrt(self.dim_in)
-            x = F.linear(x, self.weight)
-        else:
-            x = F.linear(x, self.weight)
+        x = F.linear(x, self.weight)
 
         if self.act_fn_type:
             x = self.act(x)
@@ -55,10 +49,8 @@ class Linear(torch.nn.Module):
 @pytest.mark.parametrize("BATCH", [2, 4])
 @pytest.mark.parametrize("SEQLEN", [4, 8])
 @pytest.mark.parametrize("ACTIVATION", ["", "silu", "gelu"])
-@pytest.mark.parametrize("SCALE", [True, False])
-@pytest.mark.parametrize("W_TRANS", [False])
 @pytest.mark.parametrize("DTYPE", [torch.half, torch.bfloat16])
-def test_linear(SIZE, BATCH, SEQLEN, ACTIVATION, SCALE, W_TRANS, DTYPE):
+def test_linear(SIZE, BATCH, SEQLEN, ACTIVATION, DTYPE):
     if DTYPE == torch.bfloat16:
         # TODO should match bfloat16 gemm with pytorch.
         rtol, atol = (1e-2, 3e-3)
@@ -70,12 +62,10 @@ def test_linear(SIZE, BATCH, SEQLEN, ACTIVATION, SCALE, W_TRANS, DTYPE):
         SIZE[1],
         ACTIVATION,
         False,
-        SCALE,
-        W_TRANS,
         "bfloat" if DTYPE == torch.bfloat16 else "half",
     )
     # ff.init_parameters(1024)
-    ff_pt = Linear(SIZE[0], SIZE[1], ACTIVATION, dtype=DTYPE, scale_before=SCALE).cuda()
+    ff_pt = Linear(SIZE[0], SIZE[1], ACTIVATION, dtype=DTYPE).cuda()
 
     input = torch.randn([BATCH, SEQLEN, SIZE[0]], dtype=DTYPE, device="cuda")
     input.requires_grad = True
@@ -97,4 +87,4 @@ def test_linear(SIZE, BATCH, SEQLEN, ACTIVATION, SCALE, W_TRANS, DTYPE):
 
 
 if __name__ == "__main__":
-    test_linear((5, 6), 4, 2, "", True, False, torch.bfloat16)
+    test_linear((5, 6), 4, 2, "", torch.bfloat16)
