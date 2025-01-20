@@ -49,7 +49,7 @@ class RotaryEmbeddingESM(torch.nn.Module):
         inv_freq = 1.0 / (
             base ** (torch.arange(0, dim, 2, device="cuda", dtype=torch.float32) / dim)
         )
-        self.register_buffer("inv_freq", inv_freq.to(dtype))
+        self.register_buffer("inv_freq", inv_freq)
 
         self._seq_len_cached = None
         self._cos_cached = None
@@ -75,6 +75,8 @@ class RotaryEmbeddingESM(torch.nn.Module):
             elif x.dim() == 4:
                 self._cos_cached = emb.cos()[None, None, :, :]
                 self._sin_cached = emb.sin()[None, None, :, :]
+        self._cos_cached = self._cos_cached.to(self.dtype)
+        self._sin_cached = self._sin_cached.to(self.dtype)
         return self._cos_cached, self._sin_cached
 
     def forward(
@@ -96,7 +98,7 @@ class Linear(torch.nn.Module):
         dim_out: int,
         dtype: torch.dtype = torch.half,
         init_mean: float = 0.0,
-        init_std: float = 1,
+        init_std: float = 0.1,
         scale_before: bool = True,
     ):
         super().__init__()
@@ -115,12 +117,7 @@ class Linear(torch.nn.Module):
         Returns:
             :obj:`torch.Tensor` of shape ``(batch, seq_len, dim_out)``: The output of the linear transform y.
         """  # noqa: E501
-        if self.scale_before:
-            x = x / math.sqrt(self.dim_in)
-            x = F.linear(x, self.weight)
-        else:
-            x = F.linear(x, self.weight)
-            x = x / math.sqrt(self.dim_in)
+        x = F.linear(x, self.weight)
         return x
 
 
@@ -248,9 +245,8 @@ class Attention(torch.nn.Module):
 @pytest.mark.parametrize("batch", [1, 2]) # TODO: batch=4 out of memory
 @pytest.mark.parametrize("shapes", [(4, 16), (4, 128)])
 @pytest.mark.parametrize("seqlen", [17, 257])
-@pytest.mark.parametrize("trans", [False])
 @pytest.mark.parametrize("flash_decoding", [False]) # TODO: True
-def test_attention(batch, shapes, seqlen, trans, flash_decoding):
+def test_attention(batch, shapes, seqlen, flash_decoding):
     rtol, atol = (1e-3, 2e-2)
     num_heads, dim_head = shapes
     dim_model = num_heads * dim_head
@@ -291,7 +287,7 @@ def test_attention(batch, shapes, seqlen, trans, flash_decoding):
         )
 
     attn = layers.Attention(
-        dim_model, num_heads, dim_head, "rotary", False, True, trans, False
+        dim_model, num_heads, dim_head, False
     )
     attn_pt = Attention(dim_model, num_heads, dim_head, "rotary").cuda(0)
     state_dict_pt = attn_pt.state_dict()
@@ -306,7 +302,7 @@ def test_attention(batch, shapes, seqlen, trans, flash_decoding):
             continue
         assert name in state_dict, name
         assert torch.allclose(
-            state_dict[name].transpose(0, 1) if trans else state_dict[name],
+            state_dict[name],
             param,
             rtol=rtol,
             atol=atol,
@@ -321,9 +317,10 @@ def test_attention(batch, shapes, seqlen, trans, flash_decoding):
     print(out)
     out_pt = attn_pt.forward(hidden, mask, position_bias)
     print(out_pt)
-    print((out - out_pt).abs().max().item())
+    atol = out_pt.abs().max().item() / 100
+    print("max abs diff", (out - out_pt).abs().max().item())
     assert torch.allclose(out, out_pt, rtol=rtol, atol=atol)
 
 
 if __name__ == "__main__":
-    test_attention(4, (4, 128, 512), 257, False, True)
+    test_attention(4, (4, 128), 257, True)

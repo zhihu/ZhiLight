@@ -39,10 +39,6 @@ public:
         int dim_model,
         int num_heads,
         int dim_head,
-        std::string pos_bias_type,
-        int quant,
-        bool scale_weights = false,
-        bool weight_transposed = true,
         bool parallel = false) {
         model::ModelConfig model_config(
             "",
@@ -54,12 +50,6 @@ public:
             0,
             1e-6,
             -1,
-            {},
-            scale_weights,
-            weight_transposed,
-            0,
-            1.0,
-            1.0,
             bmengine::core::DataType::kHalf);
         auto layer = PyAttention(model_config, parallel);
         return layer;
