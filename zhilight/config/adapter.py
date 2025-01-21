@@ -2,9 +2,11 @@
 # Author: spetrel@gmail.com
 
 from .dev_config import *
+from .config_util import *
 # Keep in alphabetical order
 from .cohere_adapter import CohereAdapter
 from .deepseek_adapter import DeepseekV2Adapter
+from .llama_adapter import LLaMAAdapter
 from .qwen2_adapter import Qwen2Adapter
 
 
@@ -23,12 +25,15 @@ class ModelAdapter:
     @staticmethod
     def adapt(config: dict):
         model_type = config.get("model_type", "")
+        set_default(config, "rope_scaling", {})
 
         # Keep in alphabetical order
         if model_type == "cohere":
             CohereAdapter.adapt(config)
         elif model_type == "deepseek_v2":
             DeepseekV2Adapter.adapt(config)
+        elif model_type == "llama":
+            LLaMAAdapter.adapt(config)
         elif model_type == "qwen2":
             Qwen2Adapter.adapt(config)
 

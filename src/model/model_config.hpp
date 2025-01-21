@@ -18,6 +18,10 @@ struct RopeConfig {
 
     bool neox_style { true };
     std::vector<int> section;
+
+    // LLaMA3
+    float low_freq_factor { 0 };
+    float high_freq_factor { 0 };
 };
 
 struct ModelConfig {

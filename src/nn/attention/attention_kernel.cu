@@ -49,7 +49,7 @@ static __inline__ __device__ void multiply_q_k_block(
     }
 }
 template<typename T, typename T2 = T, int DIM_HEAD = 64, int HEAD1 = 8, typename T_LOAD = double2>
-static __inline__ __device__ void multiply_q_k_block1(
+static __forceinline__ __device__ void multiply_q_k_block1(
     const T* __restrict__ s_q, // (dim_head)
     const T* __restrict__ g_k, // (len_buf, dim_head)
     T2* __restrict__ logit,    // (len_buf)
@@ -703,7 +703,9 @@ static __global__ void KERNEL_mqa_rag_buffer1(
     float* smem = shared.getPointer();
 
     // Q * K (dim_head) * (len_buf, dim_head) => (len_buf);
-    if (DIM_HEAD != 128) {
+    if constexpr(DIM_HEAD == 64) {
+        multiply_q_k_block_d64<T, float, DIM_HEAD>(g_q, key_buf, smem, len_buf, stride_kv);
+    } else if constexpr(DIM_HEAD != 128) {
         multiply_q_k_block1<T, float, DIM_HEAD>(g_q, key_buf, smem, len_buf, stride_kv);
     } else {
         multiply_q_k_block<T, float, DIM_HEAD>(g_q, key_buf, smem, len_buf, stride_kv);
@@ -1276,7 +1278,7 @@ void multi_query_attention_rag_buffer(
     BM_ASSERT_EQ(batch_size, key_buf_addrs.numel(), "batch mismatch");
     BM_ASSERT_EQ(batch_size, val_buf_addrs.numel(), "batch mismatch");
     const size_t dim_head = batch_q.size(-1);
-    BM_ASSERT(dim_head == 128 || dim_head == 576, "dim_head mismatch");
+    BM_ASSERT(dim_head == 64 || dim_head == 128 || dim_head == 576, "dim_head mismatch");
     if (dim_head == 576) {
         BM_ASSERT_EQ(output.size(-1), 512, "dim_head mismatch");
     } else {
@@ -1312,6 +1314,7 @@ void multi_query_attention_rag_buffer(
 
         auto out_dtype = batch_q.dtype();
         if (scale_key_addrs.numel()) {
+            BM_ASSERT(dim_head == 128, "Unsupported dim_head");
             BM_ASSERT_EQ(batch_q.dtype(), core::DataType::kHalf, "input must be half");
             out_dtype = dequant_dtype;
             BM_DTYPE_DISPATCH_HALF(dequant_dtype, {
@@ -1339,7 +1342,9 @@ void multi_query_attention_rag_buffer(
         } else {
             BM_DTYPE_DISPATCH_HALF(out_dtype, {
                 auto kernel = KERNEL_mqa_rag_buffer_split_kv<scalar_t, 128>;
-                if (dim_head == 576) {
+                if (dim_head == 64) {
+                    kernel = KERNEL_mqa_rag_buffer_split_kv<scalar_t, 64>;
+                } else if (dim_head == 576) {
                     kernel = KERNEL_mqa_rag_buffer_split_kv<scalar_t, 576, 512>;
                 }
                 BM_CUDART_ASSERT(cudaFuncSetAttribute(kernel, attr, dynamic_size));
@@ -1380,7 +1385,9 @@ void multi_query_attention_rag_buffer(
 
         BM_DTYPE_DISPATCH_HALF(batch_q.dtype(), {
             auto kernel = KERNEL_mqa_rag_buffer1<scalar_t, 128>;
-            if (dim_head == 576) {
+            if (dim_head == 64) {
+                kernel = KERNEL_mqa_rag_buffer1<scalar_t, 64>;
+            } else if (dim_head == 576) {
                 kernel = KERNEL_mqa_rag_buffer1<scalar_t, 576, 512>;
             }
             cudaFuncAttributes attrs;
@@ -1417,13 +1424,17 @@ void multi_query_attention_rag_buffer(
 
         {
             auto kernel = KERNEL_mqa_rag_buffer<__half, 128, 128, 8>;
-            if (dim_head == 576) {
+            if (dim_head == 128) {
+                // default
+            } else if (dim_head == 576) {
                 kernel = KERNEL_mqa_rag_buffer<__half, 576, 512, 8>;
                 if (m_query == 16) {
                     kernel = KERNEL_mqa_rag_buffer<__half, 576, 512, 16>;
                 } else if (m_query == 32) {
                     kernel = KERNEL_mqa_rag_buffer<__half, 576, 512, 32>;
                 }
+            } else {
+                throw std::runtime_error("Unsupported dim_head");
             }
 //            if (m_query == 16) {
 //                kernel = KERNEL_mqa_rag_buffer<__half, 128, 16>;
