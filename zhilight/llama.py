@@ -63,7 +63,6 @@ def _get_config(model_config) -> LLaMAModelConfig:
         "num_layers": 32,
         "dim_model": 4096,
         "num_heads": 32,
-        "dim_head": 128,
         "dim_ff": 11008,
         "vocab_size": 32000,
         "eps": 1e-6,

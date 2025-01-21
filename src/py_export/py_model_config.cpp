@@ -56,6 +56,7 @@ static void set_attr(const py::dict& cfg, const char* name, T& attr) {
 
 void pydict_to_rope_config(const py::dict& d, model::RopeConfig& config) {
     set_attr(d, "type", config.type);
+    set_attr(d, "rope_type", config.type);
     set_attr(d, "factor", config.factor);
     set_attr(d, "attn_factor", config.attn_factor);
     set_attr(d, "beta_fast", config.beta_fast);
@@ -68,6 +69,9 @@ void pydict_to_rope_config(const py::dict& d, model::RopeConfig& config) {
         py::list sec_list = d["mrope_section"].cast<py::list>();
         config.section = to_int_vector(sec_list);
     }
+    // llama3
+    set_attr(d, "low_freq_factor", config.low_freq_factor);
+    set_attr(d, "high_freq_factor", config.high_freq_factor);
 }
 
 model::ModelConfig pydict_to_model_config(py::dict& cfg) {
@@ -75,7 +79,7 @@ model::ModelConfig pydict_to_model_config(py::dict& cfg) {
     int num_layers = get_attr<int>(cfg, "num_layers", "num_hidden_layers");
     int dim_model = get_attr<int>(cfg, "dim_model", "hidden_size");
     int num_heads = get_attr<int>(cfg, "num_heads", "num_attention_heads");
-    int dim_head = get_attr<int>(cfg, "dim_head", 128);
+    int dim_head = get_attr<int>(cfg, "dim_head", get_attr<int>(cfg, "head_dim", 128));
     int dim_ff = get_attr<int>(cfg, "dim_ff", "intermediate_size");
     int vocab_size = cfg["vocab_size"].cast<int>();
     float eps = get_attr(cfg, "rms_norm_eps", get_attr(cfg, "eps", 1e-5f));
