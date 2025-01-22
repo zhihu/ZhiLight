@@ -5,9 +5,11 @@ project(zhilight)
 enable_language(C)
 enable_language(CXX)
 
+set(CMAKE_CUDA_ARCHITECTURES $ENV{CMAKE_CUDA_ARCHITECTURES})
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_ARCHITECTURES "80;89")
 endif()
+message("CMAKE_CUDA_ARCHITECTURES: ${CMAKE_CUDA_ARCHITECTURES}")
 enable_language(CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -81,8 +83,8 @@ add_library(backend STATIC ${BACKEND_SOURCES})
 set_property(TARGET backend PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 file(GLOB FLASH_ATTN_LIB "${Python_SITELIB}/flash_attn*.so")
-add_library(flash_attn SHARED IMPORTED)
-set_property(TARGET flash_attn PROPERTY IMPORTED_LOCATION ${FLASH_ATTN_LIB})
+get_filename_component(FLASH_ATTN_SO ${FLASH_ATTN_LIB} NAME)
+message("FLASH_ATTN_SO: " ${FLASH_ATTN_SO})
 
 target_include_directories(backend
     PUBLIC "src"
@@ -97,12 +99,13 @@ target_link_directories(backend
     PUBLIC "3rd/tensorrt_llm/"
     PUBLIC ${NCCL_LIBRARIES}
     PUBLIC ${Python_SITELIB}/torch/lib
+    PUBLIC ${Python_SITELIB}
 )
 
 target_link_libraries(backend
     PUBLIC bmengine
     "-Wl,-Bsymbolic -Wl,-Bsymbolic-functions"
-    flash_attn
+    ":${FLASH_ATTN_SO}"
 )
 
 file(GLOB_RECURSE PYBIND_SOURCES "src/py_export/*.cpp")
