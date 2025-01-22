@@ -1,6 +1,7 @@
 # coding=utf-8
 
 from .dev_config import *
+from .config_util import *
 
 
 class Qwen2Adapter:
