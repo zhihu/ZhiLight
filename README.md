@@ -6,6 +6,9 @@
 * [2025/01] Support [DeepSeek-VL2](https://github.com/deepseek-ai/DeepSeek-VL2) multimodal models: deepseek-vl2-tiny, deepseek-vl2-small, deepseek-vl2.
 * [2025/01] Support LLaMA3 models: Llama-3.1-8B, Llama-3.1-70B, Llama-3.2-1B, Llama-3.2-3B, Llama-3.3-70B.
 
+## Roadmap
+see [Roadmap](https://github.com/zhihu/ZhiLight/wiki/Roadmap)
+
 ## 🎉🎉 Main Features
 
 * Asynchronous OpenAI compatible interface adapted from vllm
