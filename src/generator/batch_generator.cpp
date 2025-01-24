@@ -786,6 +786,8 @@ public:
 
     void apply_repetition_penalty(Tensor& logits_all, Matrix2D<int32_t>& h_placement);
 
+    void add_logit_bias(Tensor& logits_all);
+
     Tensor log_softmax(const Tensor& logits_all, Matrix2D<float>& h_prob_prev);
 
     void erase_task(size_t b) {
@@ -1485,6 +1487,29 @@ void SearcherImplV1<int, int>::apply_repetition_penalty(
     }
 }
 
+template <>
+void SearcherImplV1<int, int>::add_logit_bias(
+    Tensor& logits_all // (batch, beam_size, vocab_size)
+) {
+    vector<int> batch_hypos;  // (batch, beam_size)
+    vector<int> token_ids;
+    vector<float> bias;
+    for (int b = 0; b < max_batch_active; ++b) {
+        if (tasks[b] && !tasks[b]->logit_bias.empty()) {
+            for (len_t h = 0; h < max_beam_size; ++h) {
+                for (auto& it: tasks[b]->logit_bias) {
+                    batch_hypos.push_back(b * max_beam_size + h);
+                    token_ids.push_back(it.first);
+                    bias.push_back(it.second);
+                }
+            }
+        }
+    }
+    if (!batch_hypos.empty()) {
+        beam_utility::scatter_update(ctx, bias, token_ids, batch_hypos, logits_all);
+    }
+}
+
 template <typename TokenT, typename ResultT>
 Tensor SearcherImplV1<TokenT, ResultT>::log_softmax(const Tensor& logits_all, Matrix2D<float>& h_prob_prev) {
     Tensor d_prob_prev = h_prob_prev.to_tensor(ctx);
@@ -1519,6 +1544,7 @@ void SearcherImplV1<int, int>::pick_top_k(
     Tensor logits_all, Tensor hidden, Mat2DInt& h_placement, Matrix2D<float>& h_prob_prev) {
     size_t logits_dim = searcher->model_->vocab_size;
     this->apply_repetition_penalty(logits_all, h_placement);
+    add_logit_bias(logits_all);
     auto penalised_logits = logits_all.chunk();
 
     // shape (max_batch_active, beam_size, logits_dim)

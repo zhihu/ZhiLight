@@ -46,6 +46,8 @@ struct SearchTask_ {
     bmengine::core::Tensor input_embeddings;  // passed-in embeddings of 'PROMPT', device=CPU
     int position_delta { 0 };  // for multi-modal model
 
+    std::map<int, float> logit_bias;
+
 public:
     void finish(generator::SearchResults&& results);
     void update_stream(const generator::SearchResults& results);

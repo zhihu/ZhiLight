@@ -63,6 +63,8 @@ else:
 
 config: DynamicBatchConfig = generator_config_from_cmd(args)
 gen_arg: GeneratorArg = generator_arg_from_cmd(args)
+gen_arg.top_logprobs = 3
+# gen_arg.logit_bias = {671: 100, 1124: 100}
 
 
 def save_answer_image(messages, answer):
@@ -84,4 +86,6 @@ with DynamicBatchGenerator(config, model) as generator:
     for _ in range(args.round):
         req_result = generator.generate(messages, gen_arg)
         print(req_result)
+        req_result.outputs[0].print_top_logprobs(generator._tokenizer, start=0, end=2)
+        # print(req_result.outputs[0].top_logprobs)
         save_answer_image(messages, req_result.outputs[0].text)

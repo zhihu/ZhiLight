@@ -99,6 +99,7 @@ class GeneratorArg:
             bee_answer_multi_span: Optional[bool] = None,
             presence_penalty: float = 0.,
             top_logprobs: int = 0,
+            logit_bias: dict[int, float] = None
     ):
         self.beam_size = beam_size
         self.max_length = max_length
@@ -112,6 +113,7 @@ class GeneratorArg:
         self.top_k = int(top_k)
         self.bee_answer_multi_span = bee_answer_multi_span
         self.top_logprobs = top_logprobs
+        self.logit_bias = logit_bias
 
         if self.is_random:
             self.seed = seed or 42
@@ -384,7 +386,7 @@ class DynamicBatchGenerator:
 
     @staticmethod
     def to_c_task(input_tokens: List[int], arg: GeneratorArg, stream=0) -> C.SearchTask:
-        return C.SearchTask(
+        task = C.SearchTask(
             input_tokens,
             arg.beam_size,
             arg.max_length,
@@ -400,6 +402,9 @@ class DynamicBatchGenerator:
             bool(arg.bee_answer_multi_span),
             arg.top_logprobs,
             int(stream))
+        if arg.logit_bias is not None:
+            task.set_logit_bias(arg.logit_bias)
+        return task
 
     def check_queue_busy(self):
         queue_size = self._c_generator.queue_size()
