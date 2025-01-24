@@ -91,6 +91,9 @@ public:
     void set_input_embeddings(py::array data) {
         task_->input_embeddings = bind::numpy_to_tensor("input_embeddings", data, true);
     }
+    void set_logit_bias(std::map<int, float> &bias) {
+        task_->logit_bias = bias;
+    }
 
     generator::SearchResults pop_res(float timeout) {
         return task_->res_queue.pop_timeout(timeout);
@@ -310,6 +313,7 @@ void define_dynamic_batch(py::module_& m) {
         .def("set_position_ids", &PySearchTask::set_position_ids)
         .def("set_input_embeddings", &PySearchTask::set_input_embeddings)
         .def("set_position_delta", &PySearchTask::set_position_delta)
+        .def("set_logit_bias", &PySearchTask::set_logit_bias)
         .def(py::init(&PySearchTask::create));
 
     py::class_<PyBatchGenerator, shared_ptr<PyBatchGenerator>>(m, "BatchGenerator")
