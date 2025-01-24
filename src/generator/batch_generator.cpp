@@ -1506,7 +1506,7 @@ void SearcherImplV1<int, int>::add_logit_bias(
         }
     }
     if (!batch_hypos.empty()) {
-        beam_utility::scatter_update(ctx, bias, token_ids, batch_hypos, logits_all);
+        beam_utility::scatter_update(ctx, bias, token_ids, batch_hypos, logits_all, true);
     }
 }
 

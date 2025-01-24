@@ -53,7 +53,8 @@ void scatter_update(
     const std::vector<float>& values,
     const std::vector<int32_t>& token_ids,  // indices[1]
     const std::vector<int32_t>& batch_ids,  // indices[0]
-    core::Tensor& logits);
+    core::Tensor& logits,
+    bool add=false);
 
 std::unordered_map<int, float> calc_repetition_ngram(
     const std::vector<int>& token_ids, float ngram_penalty);

@@ -228,11 +228,16 @@ static __global__ void BM_KERNEL(scatter_update) (
     const float* __restrict__ values,
     const int32_t* __restrict__ indices,
     const int32_t* __restrict__ batch_ids,
-    T* __restrict__ logits // (batch_size, stride)
+    T* __restrict__ logits, // (batch_size, stride)
+    bool add
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
-        logits[batch_ids[i] * stride + indices[i]] = T(values[i]);
+        if (add) {
+            logits[batch_ids[i] * stride + indices[i]] += T(values[i]);
+        } else {
+            logits[batch_ids[i] * stride + indices[i]] = T(values[i]);
+        }
     }
 }
 
@@ -280,7 +285,8 @@ void scatter_update(
     const std::vector<float>& values,
     const std::vector<int32_t>& token_ids,  // indices[1]
     const std::vector<int32_t>& batch_ids,  // indices[0]
-    core::Tensor& logits) {
+    core::Tensor& logits,
+    bool add) {
     BM_ASSERT(token_ids.size() == batch_ids.size(), "tokens and batch_id must have the same size");
     BM_ASSERT(batch_ids.size() > 0, "tokens and batch_id must have at least one element");
     auto device = logits.device();
@@ -303,7 +309,8 @@ void scatter_update(
         d_values.data<float>(),
         d_tokens.data<int32_t>(),
         d_batches.data<int32_t>(),
-        logits.mutable_data<scalar_t>());
+        logits.mutable_data<scalar_t>(),
+        add);
     });
     BM_CUDART_ASSERT(cudaGetLastError());
 }
