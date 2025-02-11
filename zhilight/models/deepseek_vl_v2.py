@@ -25,7 +25,7 @@ from zhilight.config.dev_config import *
 from zhilight.config.deepseek_adapter import DeepseekV2Adapter
 from zhilight.llama import LLaMA, LLaMAModelConfig, QuantConfig, DistConfig
 from zhilight.loader import LLaMALoader
-
+from zhilight.utils.image_utils import load_image
 
 def load_pil_images(conversations: List[Dict[str, str]]) -> List[PIL.Image.Image]:
     pil_images = []
@@ -34,8 +34,8 @@ def load_pil_images(conversations: List[Dict[str, str]]) -> List[PIL.Image.Image
         if "images" not in message:
             continue
 
-        for image_path in message["images"]:
-            pil_img = PIL.Image.open(image_path)
+        for image_path_or_url_or_pil in message["images"]:
+            pil_img = load_image(image_path_or_url_or_pil)
             pil_img = pil_img.convert("RGB")
             pil_images.append(pil_img)
 
