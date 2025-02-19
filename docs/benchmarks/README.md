@@ -5,11 +5,12 @@ Main features:
 - Support for specifying maximum and minimum QPS for batch benchmarking
 - Support for HTTP OpenAI interface
 - Rapid generation of benchmark results
+- Supports reasoning models such as Deepseek-R1
 
 ## Getting Started
 ### Pull Docker image
 ```
-docker pull ghcr.io/zhihu/zhilight/benchmark:1.0.0
+docker pull ghcr.io/zhihu/zhilight/benchmark:1.0.1
 ```
 
 ### Start server
@@ -42,6 +43,7 @@ Some main parameters:
 - `--output_path`: Path to save all request data during benchmarking, default is .
 - `--is_stream_request`: Whether it is a streaming request, default is True
 - `--min_duration_s`: Duration of each benchmark task execution (in seconds), minimum value is 60
+- `--openai_api_key`: api authentication key
 
 ## FAQ
 ### How to Construct Benchmark Data
