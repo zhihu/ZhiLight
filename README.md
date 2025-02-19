@@ -114,7 +114,7 @@ Test Description:
 | **SGLang**        |**0.18** |**1514.49**|**2135.75**|  **28.5**|**47.28**|
 | ZhiLight            |     0.1 | 1574.85   | 2086.8    | 27.07    | 38.82   |
 
-more benchmarks can be found in [benchmarks.md](docs/benchmarks/benchmarks.md)
+more benchmarks can be found in [benchmarks](docs/benchmarks/benchmarks.md)
 
 ## License
 Apache License 2.0
