@@ -134,6 +134,8 @@ model::ModelConfig pydict_to_model_config(py::dict& cfg) {
     // MOE of DeepSeek
     set_attr(cfg, "n_group", config.moe_n_group);
     set_attr(cfg, "topk_group", config.moe_topk_group);
+    set_attr(cfg, "scoring_func", config.router_scoring_func);
+    set_attr(cfg, "topk_method", config.moe_topk_method);
 
     // MLA config
     set_attr(cfg, "q_lora_rank", config.q_lora_rank);

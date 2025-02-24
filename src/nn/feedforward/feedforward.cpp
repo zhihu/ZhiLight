@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <string>
 
 namespace nn {
 
@@ -186,6 +187,8 @@ public:
     float routed_scaling_factor;
     int topk_group;
     int n_group;
+    std::string scoring_func;
+    std::string topk_method;
     core::DataType dtype;
     bool parallel;
     bool exp_parallel;
@@ -195,6 +198,7 @@ public:
     const int local_rank;
 
     Linear router;
+    Tensor e_score_correction_bias;
 
     std::vector<NormalImpl*> experts;
     std::shared_ptr<NormalImpl> shared_expert;
@@ -219,6 +223,8 @@ public:
           routed_scaling_factor(cfg.routed_scaling_factor),
           topk_group(cfg.moe_topk_group),
           n_group(cfg.moe_n_group),
+          scoring_func(cfg.router_scoring_func),
+          topk_method(cfg.moe_topk_method),
           dtype(cfg.dtype),
           parallel(parallel),
           dyn_shared(dyn_shared),
@@ -253,6 +259,9 @@ public:
                     experts.push_back(new impl::NormalImpl(ctx, cfg, quant_config, false));
                 }
             }
+        }
+        if (topk_method == "noaux_tc") {
+            e_score_correction_bias = ctx.parameter({size_t(num_experts)}, dtype);
         }
         router.set_output_type(core::DataType::kFloat);
         BM_CUDART_ASSERT(cudaHostAlloc(&pin_buf, MAX_SEQ_LEN * sizeof(int) * 4, 0));
@@ -366,13 +375,22 @@ public:
 //                functions::softmax(ctx, logit, score);
                 // std::cout << "rooting score: " << score << endl;
                 std::tie(exp_weights, exp_ids) = group_topk_softmax(
-                    ctx, logit, worker_load, n_group, topk_group, top_k, top_k_ext, norm_topk_prob, routed_scaling_factor);
+                    ctx,
+                    logit,
+                    e_score_correction_bias,
+                    worker_load,
+                    n_group, topk_group, top_k, top_k_ext, norm_topk_prob, routed_scaling_factor, scoring_func);
+                if (ctx.is_layer(300)) {
 //                Tensor ids = exp_ids.slice_dim0(0, 1).view({size_t(top_k_may_share)});
 //                Tensor w = functions::index_select(ctx, score.slice_dim0(0, 1), -1, ids);
 //                std::cout << "expert_weights(slice) " << w << endl;
+                    std::cout << "logit " << logit << endl;
+                    std::cout << "expert_weights " << exp_weights << endl;
+                    std::cout << "exp_ids " << exp_ids << endl;
+                }
             } else {
                 std::tie(exp_weights, exp_ids) = top_k_softmax(
-                    ctx, logit, worker_load, top_k, top_k_ext, norm_topk_prob, routed_scaling_factor);
+                    ctx, logit, worker_load, top_k, top_k_ext, norm_topk_prob, routed_scaling_factor, scoring_func);
             }
             if (with_shared) {
 //                std::cout << "expert_ids " << exp_ids << endl;
@@ -462,12 +480,15 @@ public:
         int seq_len) {
         vector<vector<int>> group_token_idx(num_experts_may_share);
         const int seq_len_top_k = seq_len * top_k_may_share;
+        BM_ASSERT_LE(seq_len_top_k, routing_experts.size(), "seq_len_top_k out of range");
         bool out_of_range = false;
         for (int i = 0; i < seq_len_top_k; ++i) {
-            if (bm_unlikely(routing_experts[i] >= num_experts_may_share)) {
+            int exp_id = routing_experts[i];
+            BM_ASSERT_LT(-1, exp_id, "exp_id is negative");
+            if (bm_unlikely(exp_id >= num_experts_may_share)) {
                 out_of_range = true;
             } else {
-                group_token_idx[routing_experts[i]].push_back(i / top_k_may_share);
+                group_token_idx[exp_id].push_back(i / top_k_may_share);
             }
         }
         if (out_of_range) {
@@ -722,6 +743,9 @@ FeedForward::FeedForward(
             ? new impl::GPTQMOE(ctx, cfg, quant_config, parallel, dyn_shared)
             : new impl::MOEImpl(ctx, cfg, quant_config, parallel);
         add_submodule("router", ptr->router);
+        if (ptr->topk_method == "noaux_tc") {
+            add_parameter("router.e_score_correction_bias", ptr->e_score_correction_bias);
+        }
         for (int i = 0; i < ptr->num_local_experts; ++i) {
             auto p = ptr->experts[i];
             int exp_id = ptr->global_expert_id(i);
@@ -791,6 +815,12 @@ void FeedForward::load_state_dict(
         }
         if (moe_impl->shared_expert) {
             moe_impl->shared_expert->try_fuse_up_weights(ctx);
+        }
+    }
+    if (moe_impl) {
+        if (!moe_impl->e_score_correction_bias.empty()) {
+            moe_impl->e_score_correction_bias = functions::typecast(
+                ctx, moe_impl->e_score_correction_bias, core::DataType::kFloat);
         }
     }
 }

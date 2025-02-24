@@ -545,7 +545,7 @@ public:
         high = min(high1, dim_head - 1.);
 
         _mscale = yarn_get_mscale(scaling_factor) * attn_factor;
-        if (cfg.model_type == "deepseek_v2") {
+        if (cfg.model_type == "deepseek_v2" || cfg.model_type == "deepseek_v3") {
             _mscale = yarn_get_mscale(scaling_factor, mscale) /
                       yarn_get_mscale(scaling_factor, mscale_all_dim) *
                       attn_factor;

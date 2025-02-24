@@ -985,8 +985,8 @@ core::Tensor gptq_gemm_k_major(
         BM_ASSERT_EQ(output->size(), out_shape, "Wrong output size()");
         BM_ASSERT_EQ(output->dtype(), a.dtype(), "Wrong output dtype");
     }
-    BM_ASSERT(a.dtype() == core::DataType::kHalf, "A must be half");
-    BM_ASSERT(qzeros.dtype() == core::DataType::kInt8, "qzeros must be int8");
+    BM_ASSERT_EQ(a.dtype(), core::DataType::kHalf, "A must be half");
+    BM_ASSERT_EQ(qzeros.dtype(), core::DataType::kInt8, "qzeros must be int8");
 
     int ev_level = 3;
 

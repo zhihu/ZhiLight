@@ -341,7 +341,7 @@ public:
         core::Tensor ret = ctx.tensor(out_shape, dtype);
         BM_CUDART_ASSERT(cudaMemsetAsync(ret.data(), 0, ret.nbytes(), ctx.current_stream()->ptr));
         embedding(ids, weight, ret, begin, end, scale_factor, ctx.current_stream()->ptr);
-	
+
         return ctx.reduce_sum(ret, dtype);
     }
 
@@ -363,14 +363,15 @@ public:
         size_t world_size = ctx.world_size();
         auto all = ctx.tensor({world_size, part_logits.size(0), seq_len}, input.dtype());
         ModelContext* m_ctx = dynamic_cast<ModelContext*>(const_cast<core::Context*>(&ctx));
-        if (m_ctx && m_ctx->dyn_batch()) {
+        int gather_to_master = utils::get_int_env("GATHER_LOGIT_MASTER_ONLY", 0);
+        if (m_ctx && m_ctx->dyn_batch() && gather_to_master) {
             auto chunk = all.chunk();
             ncclGroupStart();
+            c10d::NCCLSend(ctx, part_logits, 0);
             if (ctx.rank() == 0) {
                 for (int r=0; r < ctx.world_size(); r++)
                     c10d::NCCLRecv(ctx, chunk[r], r);
             }
-            c10d::NCCLSend(ctx, part_logits, 0);
             ncclGroupEnd();
         } else {
             c10d::NCCLAllGather(ctx, part_logits, all);

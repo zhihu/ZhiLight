@@ -55,6 +55,11 @@ class ModelLoader(ABC):
             torch.float8_e4m3fn = torch.int8
         from safetensors.torch import load_file
         files = sorted(glob.glob(f"{model_dir}/{pattern}"))
+        files = list(files)
+        filter_str = os.environ.get("LOAD_FILE_FILTER", "")
+        if filter_str:
+            split = filter_str.split(";")
+            files = files[:int(split[0])] + files[int(split[1]):]
         if not files:
             raise ValueError(f"No safetensors files found in: {model_dir}")
         state_dict = {}
@@ -317,8 +322,8 @@ class LLaMALoader(ModelLoader):
                        "layers.\\1.ff.experts.\\3.w_gated.", s)
             s = re.sub("model.layers.(\\d+).(mlp|block_sparse_moe).experts.(\\d+).(w2|down_proj).",
                        "layers.\\1.ff.experts.\\3.w_out.", s)
-            s = re.sub("model.layers.(\\d+).(mlp|block_sparse_moe).gate.weight",
-                       "layers.\\1.ff.router.weight", s)
+            s = re.sub("model.layers.(\\d+).(mlp|block_sparse_moe).gate.",
+                       "layers.\\1.ff.router.", s)
             s = re.sub("model.layers.(\\d+).(mlp|block_sparse_moe).shared_expert.(w1|gate_proj).",
                        "layers.\\1.ff.shared_expert.w_in.", s)
             s = re.sub("model.layers.(\\d+).(mlp|block_sparse_moe).shared_expert.(w3|up_proj).",

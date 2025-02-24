@@ -9,6 +9,8 @@
 #include <bmengine/functions/reduce.cuh>
 #include <bmengine/functions/typecast.h>
 #include <bmengine/logger/std_log_op.hpp>
+
+#include <map>
 #include <assert.h>
 
 namespace nn {
@@ -78,6 +80,16 @@ Tensor gate_fuse(
     return out;
 }
 
+#define SOFTMAX 1
+#define SIGMOID 2
+#define LINEAR 3
+static const std::map<std::string, int> scoring_func_map {
+    { "", SOFTMAX },
+    { "softmax", SOFTMAX },
+    { "sigmoid", SIGMOID },
+    { "linear", LINEAR },
+};
+
 #define MAX_TOP_K 16
 #define MAX_INLINE_NUM 16
 template<typename T, int BUF_LEN=MAX_TOP_K>
@@ -112,10 +124,6 @@ static __device__ __forceinline__ void DEV_insert_sort_topk(
 
 template<typename T>
 static __device__ __forceinline__ void DEV_softmax_inplace(const T* logits, float* data, const int n) {
-    for (int i = threadIdx.x; i < n; i += blockDim.x) {
-        data[i] = logits[i];
-    }
-
     float local_max = -1e20;
     for (int i = threadIdx.x; i < n; i += blockDim.x) {
         local_max = fmaxf(local_max, data[i]);
@@ -141,12 +149,30 @@ static __device__ __forceinline__ void DEV_softmax_inplace(const T* logits, floa
     __syncthreads();
 }
 
+template<typename T>
+static __device__ __forceinline__ void DEV_route_score(
+    const T* logits, float* data, const int n, int scoring_type) {
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+        data[i] = logits[i];
+    }
+
+    if (scoring_type == SOFTMAX) {
+        DEV_softmax_inplace(logits, data, n);
+    } else if (scoring_type == SIGMOID) {
+        for (int i = threadIdx.x; i < n; i += blockDim.x) {
+            data[i] = 1.f / (1.f + expf(data[i]));
+        }
+        __syncthreads();
+    }
+}
+
 // gridDim(seq_len) blockDim(32)
 template<typename T>
 static __global__ void KERNEL_top_k_softmax(
     const T* logits, int len_q, int num_exp, int k, float* out_v, int* out_idx,
     bool renormalize,
     float weight_scale,
+    int scoring_type,
     int top_k_ext,
     int* worker_load,
     int num_worker) {
@@ -158,7 +184,7 @@ static __global__ void KERNEL_top_k_softmax(
 
     static __shared__ float data[256];
     assert(num_exp < 256);
-    DEV_softmax_inplace(logits, data, num_exp);
+    DEV_route_score(logits, data, num_exp, scoring_type);
 
     if (threadIdx.x > 0) return;
 
@@ -172,6 +198,7 @@ static __global__ void KERNEL_top_k_softmax(
 
     float sum_e = 1.;
     if (renormalize) {
+        sum_e = 1.e-20;
         for (int i = 0; i < k; ++i) {
             sum_e += value[i];
         }
@@ -192,6 +219,7 @@ static __global__ void KERNEL_top_k_softmax(
     }
 }
 
+// Return (scores, indices)
 std::tuple<core::Tensor, core::Tensor> top_k_softmax(
     const core::Context& ctx,
     const core::Tensor& input,
@@ -199,7 +227,8 @@ std::tuple<core::Tensor, core::Tensor> top_k_softmax(
     int top_k,
     int top_k_ext,
     bool norm_topk_prob,
-    float weight_scale
+    float weight_scale,
+    const std::string& scoring_func
 ) {
     BM_ASSERT_EQ(input.ndim(), 2, "Wrong input dim");
     BM_ASSERT_LE(top_k, MAX_TOP_K, "k too big");
@@ -210,6 +239,7 @@ std::tuple<core::Tensor, core::Tensor> top_k_softmax(
 
     dim3 gridDim(input.size(0));
     auto stream = ctx.current_stream()->ptr;
+    int scoring_type = scoring_func_map.at(scoring_func);
     BM_DTYPE_DISPATCH_FLOAT(input.dtype(), {
         KERNEL_top_k_softmax<scalar_t><<<gridDim, 32, 0, stream>>>(
         input.data<scalar_t>(),
@@ -220,6 +250,7 @@ std::tuple<core::Tensor, core::Tensor> top_k_softmax(
         out_idx.mutable_data<int>(),
         norm_topk_prob,
         weight_scale,
+        scoring_type,
         top_k_ext,
         worker_load.numel() ? worker_load.data<int>() : nullptr,
         ctx.world_size());
@@ -251,12 +282,18 @@ static __device__ inline void warpBitonicSort(T& v1, int& pos, bool asc = false)
     }
 }
 
+#define DEBUG_GROUP_TOPK 0
+#define DEBUG_GROUP_BLOCK_ID 0
+
 // gridDim(seq_len, 1, 1) blockDim(num_group * 32)
 template<typename T>
 static __global__ void KERNEL_group_topk(
-    const T* logits, int num_exp, int k, float* out_v, int* out_idx,
+    const T* logits,
+    const float* correction_bias,
+    int num_exp, int k, float* out_v, int* out_idx,
     bool renormalize,
     float weight_scale,
+    int scoring_type,
     int num_group,
     int topk_group,
     int num_in_group,
@@ -276,16 +313,42 @@ static __global__ void KERNEL_group_topk(
     // softmax
     static __shared__ float data[512];
     assert(num_exp < 512);
-    DEV_softmax_inplace(logits, data, num_exp);
+    if (scoring_type == SIGMOID) {
+        if (threadIdx.x < num_exp) {
+            data[threadIdx.x] = 1.f / (1.f + expf(-float(logits[threadIdx.x])));
+#if DEBUG_GROUP_TOPK
+            assert(!isnan(data[threadIdx.x]));
+#endif
+        }
+        __syncthreads();
+    } else {
+        if (threadIdx.x < num_exp) {
+            data[threadIdx.x] = logits[threadIdx.x];
+        }
+        DEV_softmax_inplace(logits, data, num_exp);
+    }
 
     __shared__ float shared_val[32];
     __shared__ int shared_pos[32];
     __shared__ int shared_gid[32];
     __shared__ int group_ranks[32];
     // get top k in group
-    int exp_id = lane_id < num_in_group ? g * num_in_group + lane_id : -1;
-    assert(exp_id < num_exp);
-    float score = lane_id < num_in_group ? data[exp_id] : -1e20;
+    int exp_id = -1;
+    float score = -1e20;
+    if (lane_id < num_in_group) {
+        exp_id = g * num_in_group + lane_id;
+        assert(exp_id < num_exp);
+        score = data[exp_id];
+        if (correction_bias) {
+            // plus bias for sort ONLY
+            score += correction_bias[exp_id];
+        }
+    }
+#if DEBUG_GROUP_TOPK
+    if (q == DEBUG_GROUP_BLOCK_ID && g == 0 && lane_id < num_in_group) {
+        printf("UnsortGroup lane_id=%d, exp_id=%d, score=%.5f\n", lane_id, exp_id, score);
+    }
+#endif
     warpBitonicSort(score, exp_id);
 //    if (q == 0 && g == 0 && lane_id < num_in_group) {
 //        printf("lane_id=%d, exp_id=%d, score=%.5f\n", lane_id, exp_id, score);
@@ -302,10 +365,17 @@ static __global__ void KERNEL_group_topk(
         float group_score = (lane_id < num_group) ? shared_val[lane_id] : -1e20;
         int group_id = shared_gid[lane_id];
         assert(num_group <= 8);
+#if DEBUG_GROUP_TOPK
+        if (q == DEBUG_GROUP_BLOCK_ID && g == 0 && lane_id < topk_group) {
+            printf("UnSort: lane_id=%d, group_id=%d, score=%.5f\n", lane_id, group_id, group_score);
+        }
+#endif
         warpBitonicSort<float, 8>(group_score, group_id);
-//        if (q == 0 && g == 0 && lane_id < topk_group) {
-//            printf("Sorted: lane_id=%d, group_id=%d, score=%.5f\n", lane_id, group_id, group_score);
-//        }
+#if DEBUG_GROUP_TOPK
+        if (q == DEBUG_GROUP_BLOCK_ID && g == 0 && lane_id < topk_group) {
+            printf("Sorted: lane_id=%d, group_id=%d, score=%.5f\n", lane_id, group_id, group_score);
+        }
+#endif
         if (threadIdx.x < topk_group) {
             // shared_gid[threadIdx.x] = group_id;
             group_ranks[group_id] = threadIdx.x;
@@ -319,18 +389,45 @@ static __global__ void KERNEL_group_topk(
     if (group_rank >= 0 && lane_id < k) {
         shared_val[group_rank * k + lane_id] = score;
         shared_pos[group_rank * k + lane_id] = exp_id;
+#if DEBUG_GROUP_TOPK
+        if (q == DEBUG_GROUP_BLOCK_ID) {
+            printf("Copy topk in topk_group: group_rank=%d, lane_id=%d, exp_id=%d, score=%.5f\n",
+                   group_rank, lane_id, exp_id, score);
+        }
+#endif
     }
     __syncthreads();
 
-    // Final sort topk_group * k
+    // Final sort topk_group * k in 1st warp
     if (threadIdx.x < WARP_SIZE) {
         score = (lane_id < topk_group * k) ? shared_val[lane_id] : -1e20;
         exp_id = shared_pos[lane_id];
         warpBitonicSort(score, exp_id);
     }
+    if (threadIdx.x < k && correction_bias) {
+        assert(exp_id >= 0);
+#if DEBUG_GROUP_TOPK
+        if (q == DEBUG_GROUP_BLOCK_ID) {
+            printf("Final: k=%d, exp=%d, score=%.5f, original_score=%.5f, bias=%.5f\n",
+                   threadIdx.x, exp_id, score, data[exp_id], correction_bias[exp_id]);
+        }
+#endif
+        score = data[exp_id]; // use original score
+    }
+    float sum_e = 1.f;
+    if (renormalize) {
+        float tmp_score = threadIdx.x < k ? score : 0.f;
+        sum_e = functions::warpReduceSumB(tmp_score) + 1e-20;
+    }
     if (threadIdx.x < k) {
-        out_v[lane_id] = score * weight_scale;
+        out_v[lane_id] = score / sum_e * weight_scale;
         out_idx[lane_id] = exp_id;
+#if DEBUG_GROUP_TOPK
+        if (q == DEBUG_GROUP_BLOCK_ID) {
+            printf("Write: k=%d, exp=%d, score=%.5f, sum_e=%.5f, weight_scale=%.5f\n",
+                   threadIdx.x, exp_id, score, sum_e, weight_scale);
+        }
+#endif
         if (worker_load) {
             int rank = exp_id % num_worker;
             atomicAdd(&worker_load[rank], 1);
@@ -349,18 +446,23 @@ static __global__ void KERNEL_group_topk(
 std::tuple<core::Tensor, core::Tensor> group_topk_softmax(
     const core::Context& ctx,
     const core::Tensor& input,
+    const core::Tensor& score_correction_bias,
     const core::Tensor& worker_load,
     int num_group,
     int topk_group,
     int top_k,
     int top_k_ext,
     bool norm_topk_prob,
-    float weight_scale
+    float weight_scale,
+    const std::string& scoring_func
 ) {
     BM_ASSERT_EQ(input.ndim(), 2, "Wrong input dim");
     BM_ASSERT_LE(num_group, WARP_SIZE, "num_group is too big"); // otherwise block reduce
     BM_ASSERT_LE(top_k, MAX_TOP_K, "k too big");
-    BM_ASSERT(!norm_topk_prob, "norm_topk_prob is not supported");
+    if (!score_correction_bias.empty()) {
+        BM_ASSERT_EQ(score_correction_bias.numel(), input.size(1), "wrong correction_bias numel");
+        BM_ASSERT_EQ(score_correction_bias.dtype(), DataType::kFloat, "wrong correction_bias dtype");
+    }
     auto out_shape = input.shape();
     out_shape[1] = top_k_ext;
     core::Tensor out = ctx.tensor(out_shape, DataType::kFloat);
@@ -368,22 +470,26 @@ std::tuple<core::Tensor, core::Tensor> group_topk_softmax(
 
     dim3 gridDim(input.size(0));
     auto stream = ctx.current_stream()->ptr;
+    int scoring_type = scoring_func_map.at(scoring_func);
     int num_in_group = input.size(1) / num_group;
     BM_DTYPE_DISPATCH_FLOAT(input.dtype(), {
         KERNEL_group_topk<scalar_t><<<gridDim, num_group * WARP_SIZE, 0, stream>>>(
             input.data<scalar_t>(),
+            score_correction_bias.data<float>(),
             input.size(1),
             top_k,
             out.mutable_data<float>(),
             out_idx.mutable_data<int>(),
             norm_topk_prob,
             weight_scale,
+            scoring_type,
             num_group,
             topk_group,
             num_in_group,
             top_k_ext,
             worker_load.numel() ? worker_load.data<int>() : nullptr,
-            ctx.world_size());
+            ctx.world_size()
+        );
     });
     BM_CUDART_ASSERT(cudaGetLastError());
 
@@ -529,7 +635,8 @@ core::Tensor sum_experts(
             input.data<scalar_t>(),
             index.data<int>(),
             weights.data<float>(),
-            out.mutable_data<scalar_t>());
+            out.mutable_data<scalar_t>()
+        );
     });
     BM_CUDART_ASSERT(cudaGetLastError());
     return out;
@@ -589,7 +696,8 @@ core::Tensor sum_experts(
                 experts.data<int>(),
                 index_ptr,
                 weights.data<float>(),
-                out.mutable_data<scalar_t>());
+                out.mutable_data<scalar_t>()
+            );
         });
     } else {
         core::Tensor ptr_arr = ctx.tensor({ptr_vec.size()}, core::DataType::kDouble);
@@ -609,7 +717,8 @@ core::Tensor sum_experts(
                 out.mutable_data<scalar_t>(),
                 exp_parallel,
                 world_size - 1,
-                local_rank);
+                local_rank
+            );
         });
 //        BM_CUDART_ASSERT(cudaStreamSynchronize(stream));
 //        functions::check_numeric(ctx, out);

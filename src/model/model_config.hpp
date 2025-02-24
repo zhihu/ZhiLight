@@ -49,6 +49,7 @@ struct ModelConfig {
     int max_position_embeddings { 8192 }; // max length trained.
     float rope_theta { 10000.0 }; // The base period of the RoPE embeddings
     RopeConfig rope_cfg;
+
     // MOE
     int moe_num_experts { -1 }; // Number of experts per Sparse MLP layer.
     int moe_top_k { -1 }; // The number of experts to root per-token
@@ -59,6 +60,9 @@ struct ModelConfig {
     float routed_scaling_factor { 1 }; // Deep seek
     int moe_n_group { 1 }; // Deep seek
     int moe_topk_group { 1 }; // Deep seek
+    std::string router_scoring_func; // Deep seek
+    std::string moe_topk_method; // Deep seek
+
     // MLA
     int q_lora_rank { 0 };
     int kv_lora_rank { 0 };
