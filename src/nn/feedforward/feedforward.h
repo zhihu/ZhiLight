@@ -1,6 +1,7 @@
 #pragma once
 #include "model/model_config.hpp"
 #include <bmengine/core/core.h>
+#include <string>
 #include <tuple>
 
 namespace nn {
@@ -43,19 +44,22 @@ std::tuple<core::Tensor, core::Tensor> top_k_softmax(
     int k,
     int k_ext,
     bool norm_topk_prob,
-    float weight_scale = 1.
+    float weight_scale,
+    const std::string& scoring_func
 );
 
 std::tuple<core::Tensor, core::Tensor> group_topk_softmax(
     const core::Context& ctx,
     const core::Tensor& input,
+    const core::Tensor& score_correction_bias,
     const core::Tensor& worker_load,
     int num_group,
     int topk_group,
     int top_k,
     int top_k_ext,
     bool norm_topk_prob,
-    float weight_scale
+    float weight_scale,
+    const std::string& scoring_func
 );
 
 core::Tensor sum_experts(

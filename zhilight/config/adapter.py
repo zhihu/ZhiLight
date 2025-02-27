@@ -5,7 +5,7 @@ from .dev_config import *
 from .config_util import *
 # Keep in alphabetical order
 from .cohere_adapter import CohereAdapter
-from .deepseek_adapter import DeepseekV2Adapter
+from .deepseek_adapter import DeepseekV2Adapter, DeepseekV3Adapter
 from .llama_adapter import LLaMAAdapter
 from .qwen2_adapter import Qwen2Adapter
 
@@ -32,6 +32,8 @@ class ModelAdapter:
             CohereAdapter.adapt(config)
         elif model_type == "deepseek_v2":
             DeepseekV2Adapter.adapt(config)
+        elif model_type == "deepseek_v3":
+            DeepseekV3Adapter.adapt(config)
         elif model_type == "llama":
             LLaMAAdapter.adapt(config)
         elif model_type == "qwen2":

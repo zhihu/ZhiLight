@@ -104,6 +104,9 @@ ModelContext ModelContext::create(
     model_ctx.dyn_batch_ = std::make_shared<DynBatchContext>();
     if (batch_config.rag_buffer) {
         auto k_cfg = model_ctx.get_kv_cache_config();
+        if (model_ctx.cfg.qk_rope_head_dim > 0) {
+            k_cfg.dim_head = model_ctx.cfg.qk_rope_head_dim + model_ctx.cfg.qk_nope_head_dim;
+        }
         auto v_cfg = k_cfg;
         if (model_ctx.latent_cache_ && model_ctx.cfg.kv_lora_rank > 0) {
             k_cfg.num_heads = 1;

@@ -138,7 +138,7 @@ public:
 
     virtual core::Tensor& get_weight() = 0;
     virtual core::Tensor get_dequant_weight(const core::Context& ctx) {
-        throw std::runtime_error("not supported");
+        throw std::runtime_error("get_dequant_weight is not supported");
     };
     virtual core::Tensor* get_weight_scale() { return nullptr; }
 

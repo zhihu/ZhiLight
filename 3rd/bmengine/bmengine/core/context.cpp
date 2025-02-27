@@ -464,6 +464,8 @@ void Context::assign_or_copy(Tensor* dst, const Tensor* src) const {
         return;
     }
     BM_ASSERT_EQ(src->shape(), dst->shape(), "src and dst have different shape");
+    if (src->dtype() != DataType::kInt16)
+        BM_ASSERT_EQ(src->dtype(), dst->dtype(), "src and dst have different dtype");
     // allocate memory
     if (dst->data() == nullptr) {
         init_parameter(dst->name(), dst);
