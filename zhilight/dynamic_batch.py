@@ -442,7 +442,7 @@ class DynamicBatchGenerator:
             return c_task, ids
         else:
             input_tokens = self._encode(data)
-            return self.to_c_task(input_tokens, arg), input_tokens
+            return self.to_c_task(input_tokens, arg, stream=stream), input_tokens
 
     def generate(
         self,
