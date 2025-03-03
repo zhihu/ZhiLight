@@ -13,13 +13,15 @@ message("CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH}")
 find_package(Torch REQUIRED)
 find_library(TORCH_PYTHON_LIBRARY torch_python PATHS "${TORCH_INSTALL_PREFIX}/lib")
 
-file(GLOB_RECURSE TEST_SRC_NN
-    "*.cpp"
-)
+file(GLOB_RECURSE TEST_SRC_NN "*.cpp")
+# TODO: better way to share this util file
+list(APPEND TEST_SRC_NN "../../src/py_export/py_utils.cpp")
 
 pybind11_add_module(${PROJECT_NAME} ${TEST_SRC_NN})
 target_compile_definitions(${PROJECT_NAME}
     PRIVATE VERSION_INFO=${EXAMPLE_VERSION_INFO})
+
+#target_include_directories(${PROJECT_NAME} PRIVATE ${Python_SITELIB}/torch/include)
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/3rd/bmengine/bmengine/include)
 target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/src)

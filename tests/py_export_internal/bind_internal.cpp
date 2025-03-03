@@ -13,7 +13,6 @@ PYBIND11_MODULE(internals_, m) {
     bind::define_layer_embedding(layers_m);
     bind::define_layer_feed_forward(layers_m);
     bind::define_layer_linear(layers_m);
-    bind::define_layer_position_embedding(layers_m);
 
     bind::define_functions(m);
 }

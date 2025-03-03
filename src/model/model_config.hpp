@@ -15,6 +15,13 @@ struct RopeConfig {
     float mscale { 0 };
     float mscale_all_dim { 0 };
     int original_max_position { 0 };
+
+    bool neox_style { true };
+    std::vector<int> section;
+
+    // LLaMA3
+    float low_freq_factor { 0 };
+    float high_freq_factor { 0 };
 };
 
 struct ModelConfig {
@@ -27,19 +34,22 @@ struct ModelConfig {
     int vocab_size;
     float eps;
     int num_kv_heads;
-    std::vector<std::vector<bool>> mask_modules;
-    bool scale_weights;
-    bool weight_transposed;
-    int dim_model_base; // cpm dragonfly
-    float scale_emb; // cpm dragonfly
-    float scale_depth; // cpm dragonfly
     core::DataType dtype;
+
+    std::vector<std::vector<bool>> mask_modules;
+    bool scale_weights { false };
+    bool weight_transposed { false };
+    int dim_model_base { 0 }; // cpm dragonfly
+    float scale_emb { 1. }; // cpm dragonfly
+    float scale_depth { 1. }; // cpm dragonfly
+
     std::string pos_bias_type { "rotary" };
     std::string activate_fn { "silu" };
     bool tie_lm_head { false };  // Whether the model's input and output embeddings should be tied.
     int max_position_embeddings { 8192 }; // max length trained.
     float rope_theta { 10000.0 }; // The base period of the RoPE embeddings
     RopeConfig rope_cfg;
+
     // MOE
     int moe_num_experts { -1 }; // Number of experts per Sparse MLP layer.
     int moe_top_k { -1 }; // The number of experts to root per-token
@@ -50,6 +60,9 @@ struct ModelConfig {
     float routed_scaling_factor { 1 }; // Deep seek
     int moe_n_group { 1 }; // Deep seek
     int moe_topk_group { 1 }; // Deep seek
+    std::string router_scoring_func; // Deep seek
+    std::string moe_topk_method; // Deep seek
+
     // MLA
     int q_lora_rank { 0 };
     int kv_lora_rank { 0 };
@@ -71,12 +84,6 @@ struct ModelConfig {
         int vocab_size,
         float eps = 1e-6,
         int num_kv_heads = -1,
-        const std::vector<std::vector<bool>>& mask_modules = {},
-        bool scale_weights = false,
-        bool weight_transposed = false,
-        int dim_model_base = 256,
-        float scale_depth = 1.4,
-        float scale_emb = 12,
         core::DataType dtype = core::DataType::kHalf)
         : model_type(model_type),
           num_layers(num_layers),
@@ -87,12 +94,6 @@ struct ModelConfig {
           vocab_size(vocab_size),
           eps(eps),
           num_kv_heads(num_kv_heads == -1 ? num_heads : num_kv_heads),
-          mask_modules(mask_modules),
-          scale_weights(scale_weights),
-          weight_transposed(weight_transposed),
-          dim_model_base(dim_model_base),
-          scale_depth(scale_depth),
-          scale_emb(scale_emb),
           dtype(dtype) {
         this->mask_modules.resize(num_layers);
         for (auto& it : this->mask_modules) {

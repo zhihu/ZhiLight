@@ -99,7 +99,7 @@ def test_rotary_embedding(SIZE, BATCH):
         h_q = torch.randn((SIZE[0], SIZE[1], SIZE[2]), dtype=torch.half, device="cuda")
         h_k = torch.randn((SIZE[0], SIZE[1], SIZE[2]), dtype=torch.half, device="cuda")
     else:
-        pos = torch.arange(0, SIZE[0], dtype=torch.int32, device="cuda").repeat(BATCH)
+        pos = torch.arange(0, SIZE[0], dtype=torch.int32, device="cuda").repeat((BATCH, 1))
         h_q = torch.randn(
             (BATCH, SIZE[0], SIZE[1], SIZE[2]), dtype=torch.half, device="cuda"
         )

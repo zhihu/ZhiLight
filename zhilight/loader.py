@@ -9,6 +9,7 @@ import time
 import torch
 from typing import Dict
 from abc import ABC, abstractmethod
+from .config.adapter import ModelAdapter
 from .quant import QuantConfig, QuantType
 
 
@@ -54,6 +55,11 @@ class ModelLoader(ABC):
             torch.float8_e4m3fn = torch.int8
         from safetensors.torch import load_file
         files = sorted(glob.glob(f"{model_dir}/{pattern}"))
+        files = list(files)
+        filter_str = os.environ.get("LOAD_FILE_FILTER", "")
+        if filter_str:
+            split = filter_str.split(";")
+            files = files[:int(split[0])] + files[int(split[1]):]
         if not files:
             raise ValueError(f"No safetensors files found in: {model_dir}")
         state_dict = {}
@@ -123,61 +129,6 @@ class ModelLoader(ABC):
         return state_dict
 
 
-def _set_env(name, value, tip=''):
-    if name not in os.environ:
-        print(f"### Auto Set {name}={value} {tip}")
-        os.environ[name] = str(value)
-
-
-def _set_envs(env_dict: dict):
-    for k, v in env_dict.items():
-        _set_env(k, v)
-
-
-def _get_quant_method(model_config: dict):
-    quant_cfg = model_config.get("quantization_config", {})
-    return quant_cfg.get("quant_method") if quant_cfg else None
-
-
-def _adapt_qwen2_config(model_config: dict, ext_config: dict):
-    if model_config["num_layers"] in [48, 28] and model_config["dim_model"] in [5120, 3584]:
-        m_size = '14b' if model_config["num_layers"] == 48 else '7b'
-        print(f"##### Adapt qwen2 {m_size} config ########")
-        _set_envs({
-            "CHUNKED_PREFILL": 1,
-            "CHUNKED_PREFILL_SIZE": 512,
-            "CPM_FUSE_QKV": 1,
-            "CPM_FUSE_FF_IN": 1,
-        })
-        if os.environ.get("CHUNKED_PREFILL", "") == "1":
-            _set_envs({
-                "HOST_REDUCE": 1,
-                "HOST_REDUCE_COPY_ONLY": 1,
-                "DUAL_STREAM": 1,
-                "DUAL_STREAM_THRESHOLD": 100,
-            })
-    if model_config["num_layers"] == 80 and model_config["dim_model"] == 8192:
-        m_size = '72b' if model_config["intermediate_size"] == 29696 else '110b'
-        print(f"##### Adapt qwen2 {m_size} config ########")
-        _set_envs({
-            "HIGH_PRECISION": 0,
-            "CPM_FUSE_QKV": 1,
-            "CPM_FUSE_FF_IN": 2,
-            "DUAL_STREAM": 1,
-            "REDUCE_TP_INT8_THRES": 1000,
-        })
-        if m_size == '110b':
-            _set_env("PRE_ALLOC_ALL_TOKEN", 0, "for 110b to reduce memory usage.")
-        if _get_quant_method(model_config) == "awq":
-            _set_env("AWQ_USE_EXLLAMA", 1)
-    if "rope_scaling" in model_config:
-        if "factor" in model_config["rope_scaling"] and model_config["rope_scaling"]["factor"] > 1.:
-            if os.environ.get("DISABLE_ROPE_SCALING", "") == "1":
-                model_config.pop("rope_scaling")
-            _set_env("CHUNKED_PREFILL", 1, "for LONG context to reduce memory usage!")
-            _set_envs({"CHUNKED_PREFILL_SIZE": 8192})
-
-
 class LLaMALoader(ModelLoader):
     def __init__(self, model_path: str, lazy: bool = False):
         self._model_path = model_path
@@ -207,85 +158,7 @@ class LLaMALoader(ModelLoader):
             raise ValueError(f"{model_path}/config.json not found")
         with open(f"{model_path}/config.json") as fp:
             model_config = json.load(fp)
-        return LLaMALoader.adapt_hf_config(model_config)
-
-    @staticmethod
-    def adapt_hf_config(model_config: dict):
-        # if not os.path.isfile(f"{model_path}/config.json"):
-        #     return model_config
-        # with open(f"{model_path}/config.json") as fp:
-        #     ext_config = json.load(fp)
-        ext_config = model_config
-        if "num_hidden_layers" in ext_config:
-            # model_config.update({k: v for (k, v) in ext_config.items() if k not in model_config})
-            model_config["num_layers"] = ext_config["num_hidden_layers"]
-            model_config["dim_model"] = ext_config["hidden_size"]
-            model_config["num_heads"] = ext_config["num_attention_heads"]
-            if "num_key_value_heads" in ext_config:
-                model_config["num_kv_heads"] = ext_config["num_key_value_heads"]
-            if "max_position_embeddings" in ext_config:
-                model_config["max_token"] = ext_config["max_position_embeddings"]
-            model_config["dim_ff"] = ext_config["intermediate_size"]
-            if "rms_norm_eps" in ext_config:
-                model_config["eps"] = ext_config["rms_norm_eps"]
-            model_config["activate_fn"] = ext_config["hidden_act"]
-            model_config["bfloat16"] = "bfloat16" == ext_config["torch_dtype"]
-            model_config["new_vocab"] = False
-
-        if ext_config.get("model_type", "") == "qwen2":
-            _adapt_qwen2_config(model_config, ext_config)
-
-        if ext_config.get("model_type", "") == "deepseek_v2":
-            _set_env("FREEZE_MEM_EACH_LAYER", 1)
-            _set_env("LATENT_CACHE", 1)
-            _set_env("FUSE_ATTN_SEARCH", 0)
-            _set_env("CPM_FUSE_FF_IN", 2)
-            _set_env("MOE_EXP_PARALLEL", 1)
-            quant_cfg = ext_config.get("quantization_config", {})
-            quant_method = None
-            if quant_cfg:
-                quant_method = quant_cfg.get("quant_method")
-                if quant_method == "awq":
-                    _set_env("AWQ_USE_EXLLAMA", 1)
-                if quant_method == "awq" or quant_method == "gptq":
-                    _set_env("FUSE_GPTQ_MOE", 1)
-                    _set_env("MOE_DYN_SHARED", 1)
-                    _set_env("GPTQ_MOE_M_THRES", 16)
-                    _set_env("ROUTED_SCALING_TO_WEIGHT", 1)  # prevent float16 underflow
-            if quant_method == 'awq' and ext_config["intermediate_size"] == 10944:
-                print(f"##### Fix intermediate_size for TP!!! #####")
-                ext_config["intermediate_size"] += 64
-            s = int(ext_config["n_shared_experts"]) * int(ext_config["moe_intermediate_size"])
-            model_config["shared_expert_intermediate_size"] = s
-            dim_head = ext_config["qk_nope_head_dim"] + ext_config["qk_rope_head_dim"]
-            model_config["dim_head"] = dim_head
-
-        if ext_config.get("model_type", "") == "cohere":
-            model_config["eps"] = ext_config["layer_norm_eps"]
-            if 'tie_lm_head' not in ext_config:
-                model_config["tie_lm_head"] = True
-            if ext_config.get("use_qk_norm", False):
-                os.environ["CPM_FUSE_QKV"] = "0"
-            os.environ["DUAL_STREAM"] = "0"  # EncoderLayer is different
-            os.environ["DEQUANT_DESC_ACT"] = "1"  # dequant attn_out to speedup
-
-        if ext_config.get("model_type", None) is None and ext_config["architectures"][0].lower().startswith("minicpm"):
-            model_config["model_type"] = "cpm_dragonfly"
-
-        if os.environ.get("CHUNKED_PREFILL", "") == "1":
-            _set_env("DUAL_STREAM_THRESHOLD", 100)
-
-        quant_config = ext_config.get("quantization_config", {})
-        if (
-            quant_config
-            and quant_config.get("desc_act", False)
-            and model_config.get("bfloat16", False)
-            and not model_config.get("force_half", False)
-        ):
-            print("WARNING: force convert to half dtype for using GPTQ kernel")
-            model_config["bfloat16"] = False
-            model_config["force_half"] = True
-        return model_config
+        return ModelAdapter.adapt(model_config)
 
     def fetch_parameter(self, name):
         try:
@@ -449,8 +322,8 @@ class LLaMALoader(ModelLoader):
                        "layers.\\1.ff.experts.\\3.w_gated.", s)
             s = re.sub("model.layers.(\\d+).(mlp|block_sparse_moe).experts.(\\d+).(w2|down_proj).",
                        "layers.\\1.ff.experts.\\3.w_out.", s)
-            s = re.sub("model.layers.(\\d+).(mlp|block_sparse_moe).gate.weight",
-                       "layers.\\1.ff.router.weight", s)
+            s = re.sub("model.layers.(\\d+).(mlp|block_sparse_moe).gate.",
+                       "layers.\\1.ff.router.", s)
             s = re.sub("model.layers.(\\d+).(mlp|block_sparse_moe).shared_expert.(w1|gate_proj).",
                        "layers.\\1.ff.shared_expert.w_in.", s)
             s = re.sub("model.layers.(\\d+).(mlp|block_sparse_moe).shared_expert.(w3|up_proj).",

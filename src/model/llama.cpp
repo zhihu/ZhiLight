@@ -49,6 +49,10 @@ LLaMA::LLaMA(core::Context& ctx, ModelConfig model_config, QuantConfig quant_con
         token_embedding.set_logit_scale(model_config.logit_scale);
         ln_after_enc.set_rms(false);
     }
+
+    if (utils::get_int_env("ROPE_CACHE") == 1) {
+        rope_preparer = std::make_unique<nn::RopePreparer>(ctx, model_config);
+    }
 }
 
 core::Tensor LLaMA::forward(
@@ -79,9 +83,15 @@ core::Tensor LLaMA::encode(
     const core::Tensor& hidden_pass, // half (batch, len_q, dim_model)
     bool ln_output) {
     ctx.set_current_layer(-1);
-    auto hidden = token_embedding(ctx, ids);
-    if (hidden_pass.numel()) {
-        hidden = hidden_pass;
+    Tensor hidden;
+    if (hidden_pass.empty()) {
+        hidden = token_embedding(ctx, ids);
+    } else {
+        hidden = functions::typecast(ctx, hidden_pass, dtype);
+    }
+    if (rope_preparer && ctx.dyn_batch()) {
+        auto& rope_cache = ctx.dyn_batch()->rope_cache;
+        std::tie(rope_cache.cos, rope_cache.sin) = rope_preparer->forward(ctx, ids, pos_ids);
     }
     bool dual_stream = utils::get_int_env("DUAL_STREAM", 0) > 0 && ctx.world_size() > 1;
     int dual_stream_thres = utils::get_int_env("DUAL_STREAM_THRESHOLD", 1024);
@@ -119,7 +129,15 @@ core::Tensor LLaMA::encode(
         hidden = ln_after_enc(ctx, hidden);
     }
     ctx.print_events();
+    if (ctx.dyn_batch())
+        ctx.dyn_batch()->rope_cache.clear();
     return hidden;
+}
+
+core::Tensor LLaMA::get_input_embeddings(
+    ModelContext& ctx, const core::Tensor& ids) {
+    ctx.set_current_layer(-1);
+    return token_embedding.forward(ctx, ids);
 }
 
 core::Tensor LLaMA::get_logits(ModelContext& ctx, const core::Tensor& hidden, bool ln_input) {

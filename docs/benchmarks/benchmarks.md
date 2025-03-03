@@ -2,6 +2,8 @@
 
 We conducted performance reviews on various mainstream NVIDIA GPUs with different model sizes and precisions. For dense models ranging from 2B to 110B parameters on PCIe devices, ZhiLight demonstrates significant performance advantages compared to mainstream open-source inference engines.
 
+To quickly start a benchmark task, refer to the [guide](README.md).
+
 Test Description:
 - Test purpose is to demonstrate performance, applicable scenarios and limitations
 - Test dataset contains approximately 3.7k prompts

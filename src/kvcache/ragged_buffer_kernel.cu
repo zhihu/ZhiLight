@@ -271,6 +271,7 @@ void copy_to_rag_buffer2(
     dim3 gridDim(k_src.size(0), k_src.size(1), is_scale ? 1 : k_src.size(2));
     auto stream = ctx.current_stream()->ptr;
     if (is_scale) {
+        // k_src: (batch, len_q, num_kv_heads)
         BM_ASSERT_EQ(k_src.dtype(), core::DataType::kFloat, "scale is not float");
         using scalar_t = float;
         KERNEL_copy_to_rag_buffer2_scale<<<gridDim, k_src.size(2), 0, stream>>>(

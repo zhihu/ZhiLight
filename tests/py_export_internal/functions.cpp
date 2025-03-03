@@ -1,3 +1,6 @@
+#include "bind_internal.h"
+#include "internal_utils.h"
+
 #include "nn/nn.h"
 #include "nn/position/rotary_embedding.h"
 #include "model/model.h"
@@ -5,20 +8,26 @@
 #include <bmengine/core/core.h>
 #include <bmengine/functions/all.h>
 #include <pybind11/numpy.h>
+#include <csignal>
+#include <iostream>
+#include <memory>
+#include <random>
 #include <stdexcept>
 #include <tuple>
-#include <iostream>
-#include <random>
-#include <csignal>
 #include <torch/extension.h>
 #include <ATen/ATen.h>
 
-#include "bind_internal.h"
-#include "internal_utils.h"
-
 namespace py = pybind11;
 
+using bmengine::core::Engine;
+using std::shared_ptr;
 class PyFunctions {
+
+    static shared_ptr<Engine> create_test_engine() {
+        std::vector<bmengine::core::DeviceConfiguration> devices;
+        devices.emplace_back(0, (size_t) 2 << 30);
+        return std::make_shared<Engine>(devices);
+    }
 
 public:
     static std::tuple<float, std::vector<float>> log_prob(
@@ -27,12 +36,7 @@ public:
         std::vector<float> inputs_ext,
         std::vector<size_t> input_ext_size,
         std::vector<int> labels) {
-        bmengine::core::Storage* storage;
-        bmengine::core::Engine* engine;
-        std::vector<bmengine::core::DeviceConfiguration> devices;
-        devices.emplace_back(0, (size_t) 2 << 30);
-
-        engine = new bmengine::core::Engine(devices);
+        auto engine = create_test_engine();
         bmengine::core::Context ctx = engine->create_context({ 0 });
         {
             auto d = ctx.with_device(0);
@@ -57,14 +61,9 @@ public:
 
     static std::tuple<py::array, py::array> rotary_embedding_2(
         int dim_head, py::array& pos, py::array& q, py::array& k) {
-        bmengine::core::Storage* storage;
-        bmengine::core::Engine* engine;
-        std::vector<bmengine::core::DeviceConfiguration> devices;
-        devices.emplace_back(0, (size_t) 2 << 30);
+        auto engine = create_test_engine();
 
         model::ModelConfig model_config("", 1, dim_head, 1, dim_head, dim_head, 4096);
-
-        engine = new bmengine::core::Engine(devices);
 
         auto ctx = engine->create_context({ 0 });
         {
@@ -155,13 +154,7 @@ public:
     }
 
     static py::array concat_tensor(py::array& A, py::array& B, int dim) {
-        bmengine::core::Storage* storage;
-        bmengine::core::Engine* engine;
-        std::vector<bmengine::core::DeviceConfiguration> devices;
-        devices.emplace_back(0, (size_t) 2 << 29);
-        std::signal(SIGABRT, [](int sig) { bmengine::print_demangled_trace(15); });
-
-        engine = new bmengine::core::Engine(devices);
+        auto engine = create_test_engine();
 
         auto ctx = engine->create_context({ 0 });
         {
@@ -191,13 +184,7 @@ public:
     }
 
     static at::Tensor index_along_dim(at::Tensor input, int dim, at::Tensor index) {
-        bmengine::core::Storage* storage;
-        bmengine::core::Engine* engine;
-        std::vector<bmengine::core::DeviceConfiguration> devices;
-        devices.emplace_back(0, (size_t) 2 << 29);
-        std::signal(SIGABRT, [](int sig) { bmengine::print_demangled_trace(15); });
-
-        engine = new bmengine::core::Engine(devices);
+        auto engine = create_test_engine();
 
         auto ctx = engine->create_context({ 0 });
         {
@@ -210,13 +197,7 @@ public:
     }
 
     static at::Tensor sum(at::Tensor input) {
-        bmengine::core::Storage* storage;
-        bmengine::core::Engine* engine;
-        std::vector<bmengine::core::DeviceConfiguration> devices;
-        devices.emplace_back(0, (size_t) 2 << 29);
-        std::signal(SIGABRT, [](int sig) { bmengine::print_demangled_trace(15); });
-
-        engine = new bmengine::core::Engine(devices);
+        auto engine = create_test_engine();
 
         auto ctx = engine->create_context({ 0 });
         {
@@ -228,13 +209,7 @@ public:
     }
 
     static at::Tensor div(at::Tensor input_a, at::Tensor input_b, float eps) {
-        bmengine::core::Storage* storage;
-        bmengine::core::Engine* engine;
-        std::vector<bmengine::core::DeviceConfiguration> devices;
-        devices.emplace_back(0, (size_t) 2 << 29);
-        std::signal(SIGABRT, [](int sig) { bmengine::print_demangled_trace(15); });
-
-        engine = new bmengine::core::Engine(devices);
+        auto engine = create_test_engine();
 
         auto ctx = engine->create_context({ 0 });
         {
@@ -247,13 +222,7 @@ public:
     }
 
     static at::Tensor softmax(at::Tensor scores, float temperature) {
-        bmengine::core::Storage* storage;
-        bmengine::core::Engine* engine;
-        std::vector<bmengine::core::DeviceConfiguration> devices;
-        devices.emplace_back(0, (size_t) 2 << 29);
-        std::signal(SIGABRT, [](int sig) { bmengine::print_demangled_trace(15); });
-
-        engine = new bmengine::core::Engine(devices);
+        auto engine = create_test_engine();
 
         auto ctx = engine->create_context({ 0 });
         {
@@ -267,13 +236,7 @@ public:
     }
 
     static at::Tensor amax(at::Tensor input) {
-        bmengine::core::Storage* storage;
-        bmengine::core::Engine* engine;
-        std::vector<bmengine::core::DeviceConfiguration> devices;
-        devices.emplace_back(0, (size_t) 2 << 29);
-        std::signal(SIGABRT, [](int sig) { bmengine::print_demangled_trace(15); });
-
-        engine = new bmengine::core::Engine(devices);
+        auto engine = create_test_engine();
 
         auto ctx = engine->create_context({ 0 });
         {
@@ -285,13 +248,7 @@ public:
     }
 
     static at::Tensor amin(at::Tensor input) {
-        bmengine::core::Storage* storage;
-        bmengine::core::Engine* engine;
-        std::vector<bmengine::core::DeviceConfiguration> devices;
-        devices.emplace_back(0, (size_t) 2 << 29);
-        std::signal(SIGABRT, [](int sig) { bmengine::print_demangled_trace(15); });
-
-        engine = new bmengine::core::Engine(devices);
+        auto engine = create_test_engine();
 
         auto ctx = engine->create_context({ 0 });
         {
@@ -303,13 +260,7 @@ public:
     }
 
     static at::Tensor add(at::Tensor a, float b) {
-        bmengine::core::Storage* storage;
-        bmengine::core::Engine* engine;
-        std::vector<bmengine::core::DeviceConfiguration> devices;
-        devices.emplace_back(0, (size_t) 2 << 29);
-        std::signal(SIGABRT, [](int sig) { bmengine::print_demangled_trace(15); });
-
-        engine = new bmengine::core::Engine(devices);
+        auto engine = create_test_engine();
 
         auto ctx = engine->create_context({ 0 });
         {

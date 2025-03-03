@@ -16,12 +16,10 @@ class Linear(torch.nn.Module):
         dtype: torch.dtype = torch.half,
         init_mean: float = 0.0,
         init_std: float = 1,
-        scale_before: bool = True,
     ):
         super().__init__()
         self.dim_in = self.in_features = dim_in
         self.dim_out = self.out_features = dim_out
-        self.scale_before = scale_before
         self.weight = torch.nn.parameter.Parameter(
             torch.empty((dim_out, dim_in), dtype=dtype)
         )
@@ -34,12 +32,7 @@ class Linear(torch.nn.Module):
         Returns:
             :obj:`torch.Tensor` of shape ``(batch, seq_len, dim_out)``: The output of the linear transform y.
         """  # noqa: E501
-        if self.scale_before:
-            x = x / math.sqrt(self.dim_in)
-            x = F.linear(x, self.weight)
-        else:
-            x = F.linear(x, self.weight)
-            # x = x / math.sqrt(self.dim_in)
+        x = F.linear(x, self.weight)
         return x
 
 
@@ -64,7 +57,6 @@ class FeedForward(torch.nn.Module):
         dim_ff: int,
         dtype=torch.half,
         dropout_p: Optional[float] = None,
-        scale_before: bool = True,
     ):
         super().__init__()
 
@@ -72,14 +64,12 @@ class FeedForward(torch.nn.Module):
             dim_in=dim_model,
             dim_out=dim_ff,
             dtype=dtype,
-            scale_before=scale_before,
         )
 
         self.w_gated = Linear(
             dim_in=dim_model,
             dim_out=dim_ff,
             dtype=dtype,
-            scale_before=scale_before,
         )
         self.act = torch.nn.GELU("tanh")
 
@@ -92,7 +82,6 @@ class FeedForward(torch.nn.Module):
             dim_in=dim_ff,
             dim_out=dim_model,
             dtype=dtype,
-            scale_before=scale_before,
         )
 
     def forward(self, x: torch.Tensor):
@@ -122,22 +111,20 @@ class FeedForward(torch.nn.Module):
 @pytest.mark.parametrize("SIZE", [(2, 4)])
 @pytest.mark.parametrize("BATCH", [2, 4])
 @pytest.mark.parametrize("SEQLEN", [2, 4, 8])
-@pytest.mark.parametrize("SCALE", [True, False])
-@pytest.mark.parametrize("TRANS", [True, False])
-def test_feedforward(SIZE, BATCH, SEQLEN, SCALE, TRANS):
+def test_feedforward(SIZE, BATCH, SEQLEN):
     rtol, atol = (1e-3, 1e-2)
 
     input = torch.randn([BATCH, SEQLEN, SIZE[0]], dtype=torch.half, device="cuda")
 
-    ff = layers.FeedForward(SIZE[0], SIZE[1], "gelu", 0, SCALE, TRANS)
-    ff_pt = FeedForward(SIZE[0], SIZE[1], dtype=torch.half, scale_before=SCALE).cuda(0)
+    ff = layers.FeedForward(SIZE[0], SIZE[1], "gelu", 0, False, False)
+    ff_pt = FeedForward(SIZE[0], SIZE[1], dtype=torch.half).cuda(0)
 
     state_dict_pt = ff_pt.state_dict(prefix="ff.")
     # transposed tensor must be contiguous before passing to numpy.
     ff.load_state_dict(
         dict(
             [
-                (k, (v.transpose(0, 1) if TRANS else v).contiguous().cpu().numpy())
+                (k, v.contiguous().cpu().numpy())
                 for k, v in state_dict_pt.items()
             ]
         )
@@ -147,11 +134,7 @@ def test_feedforward(SIZE, BATCH, SEQLEN, SCALE, TRANS):
     for name, param in state_dict_pt.items():
         assert name in state_dict
         assert torch.allclose(
-            (
-                torch.from_numpy(state_dict[name]).transpose(0, 1)
-                if TRANS
-                else torch.from_numpy(state_dict[name])
-            ).to(torch.half),
+            torch.from_numpy(state_dict[name]).to(torch.half),
             param.cpu(),
             rtol=rtol,
             atol=atol,
@@ -169,4 +152,4 @@ def test_feedforward(SIZE, BATCH, SEQLEN, SCALE, TRANS):
 
 
 if __name__ == "__main__":
-    test_feedforward((2, 4), 2, 2, False, True)
+    test_feedforward((2, 4), 2, 2)

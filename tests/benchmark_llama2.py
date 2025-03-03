@@ -38,10 +38,7 @@ def load_model(ver="7b"):
     }
 
     model = LLaMA(
-        "",
         model_dir,
-        -1,
-        memory_limit=78 << 30,
         model_config=model_config_70b,
         quant_config=None,
         parallel=True,

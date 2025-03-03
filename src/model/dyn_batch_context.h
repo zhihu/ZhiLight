@@ -55,7 +55,17 @@ struct AuxInfo {
 typedef utils::TSQueue<AuxInfo> AuxInfoQueue;
 class RagBufferContext;
 
+struct RopeCache {
+    Tensor cos;
+    Tensor sin;
+    void clear() {
+        cos = Tensor();
+        sin = Tensor();
+    }
+};
+
 struct DynBatchContext {
+    RopeCache rope_cache;
     // search
     Tensor s_token;
     Tensor s_sub;
@@ -268,6 +278,16 @@ struct DynBatchContext {
             part->input_len_no_split = full_len;
             parts.push_back(part);
         }
+        // split rope_cache
+        if (rope_cache.cos.numel() > 0) {
+            auto cos = split_tensor(rope_cache.cos, num_split, p_size0);
+            auto sin = split_tensor(rope_cache.sin, num_split, p_size0);
+            for (int i = 0; i < num_split; ++i) {
+                parts[i]->rope_cache.cos = cos[i];
+                parts[i]->rope_cache.sin = sin[i];
+            }
+        }
+
         return parts;
     }
 

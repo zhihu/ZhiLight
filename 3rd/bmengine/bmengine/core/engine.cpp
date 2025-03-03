@@ -132,8 +132,8 @@ EngineImpl::EngineImpl(const std::vector<DeviceConfiguration>& cfg, int tp)
 }
 EngineImpl::~EngineImpl() {
     for (int i = 0; i < handles.size(); i++) {
-        delete handles[i];
         delete allocators[i];
+        delete handles[i];
         delete streams[i];
         delete device_lock[i];
     }

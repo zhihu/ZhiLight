@@ -18,7 +18,8 @@ const Tensor aten_to_tensor(const Context& ctx, const at::Tensor& at_tensor);
 
 at::Tensor tensor_to_aten(const Context& ctx, const Tensor& tensor);
 
-void load_state_dict(
+// convert every at::Tensor to core::Tensor
+void load_at_state_dict(
     Context& ctx,
     const std::map<std::string, at::Tensor>& state_dict,
     std::map<const std::string, Tensor*> named_params,

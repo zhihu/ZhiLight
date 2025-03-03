@@ -31,6 +31,7 @@ public:
     bool is_parallel() const {
         return parallel_;
     }
+    bool is_loaded() const { return loaded_; }
 
     model::ModelBase* get_model(int i) {
         return par_models()[i];

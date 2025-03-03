@@ -31,6 +31,8 @@ protected:
 
     MemoryAllocator* parent { nullptr };
 
+    bool allow_gc_ { true };
+
     Memory new_mem(int pos, void* ptr, size_t size);
     void memory_move(void* dst, void* src, size_t nbytes);
 
@@ -56,6 +58,8 @@ public:
     size_t get_memory_limit() const { return memory_limit; }
     size_t get_free_memory() const { return memory_limit - used_memory(); }
     size_t get_block_num() const { return mems.size(); }
+
+    void set_allow_gc(bool allow) { allow_gc_ = allow; }
 };
 
 // for memory check

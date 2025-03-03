@@ -1,3 +1,6 @@
+#include "bind_internal.h"
+#include "internal_utils.h"
+
 #include "nn/nn.h"
 #include "model/model.h"
 #include "utils/exception.h"
@@ -10,8 +13,6 @@
 #include <tuple>
 #include <iostream>
 #include <random>
-
-#include "bind_internal.h"
 
 namespace py = pybind11;
 

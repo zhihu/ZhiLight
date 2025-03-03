@@ -170,7 +170,7 @@ public:
         if (is_address_changed(h_scale_k_addresses, BUF_K, &TransformerBuffer::get_scale, layer)) {
             set_buffer_addr(ctx);
         }
-        return ctx.identity(&scale_k_address, "buf_k_addresses")->index_dim0(layer);
+        return ctx.identity(&scale_k_address, "scale_k_addr")->index_dim0(layer);
     }
 
     Tensor buf_v_addr(ModelContext &ctx, int layer) {
@@ -185,7 +185,7 @@ public:
         if (is_address_changed(h_scale_v_addresses, BUF_V, &TransformerBuffer::get_scale, layer)) {
             set_buffer_addr(ctx);
         }
-        return ctx.identity(&scale_v_address, "buf_k_addresses")->index_dim0(layer);
+        return ctx.identity(&scale_v_address, "scale_v_addr")->index_dim0(layer);
     }
 
     size_t get_buf_len(size_t b) {

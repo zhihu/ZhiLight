@@ -170,6 +170,13 @@ struct EventScope {
     ~EventScope() { ctx.recordEvent(end_name, debug_level); }
 };
 
+class GCStopper {
+    const Context& ctx;
+public:
+    GCStopper(const Context& ctx);
+    ~GCStopper();
+};
+
 } // namespace core
 
 } // namespace bmengine

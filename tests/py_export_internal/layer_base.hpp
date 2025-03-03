@@ -1,3 +1,6 @@
+#include "bind_internal.h"
+#include "internal_utils.h"
+
 #include "nn/nn.h"
 #include "model/model.h"
 #include "utils/exception.h"
@@ -10,9 +13,6 @@
 #include <tuple>
 #include <iostream>
 #include <random>
-
-#include "bind_internal.h"
-#include "internal_utils.h"
 
 namespace py = pybind11;
 
@@ -34,7 +34,7 @@ public:
     PyLayerBase(Args&&... args) {
 
         std::vector<bmengine::core::DeviceConfiguration> devices;
-        devices.emplace_back(0, (size_t) 2 << 23);
+        devices.emplace_back(0, (size_t) 2 << 30);
 
         // TODO why not make a python object for this?
         engine = std::make_shared<bmengine::core::Engine>(devices);
@@ -61,7 +61,7 @@ public:
 
     void load_state_dict(const std::map<std::string, at::Tensor>& state_dict) {
         auto named_params = layer->named_parameters("", true);
-        bind::load_state_dict(*ctx, state_dict, named_params);
+        bind::load_at_state_dict(*ctx, state_dict, named_params);
     }
 
     std::map<const std::string, at::Tensor> named_parameters() {

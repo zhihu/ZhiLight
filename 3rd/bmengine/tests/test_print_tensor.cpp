@@ -1,5 +1,4 @@
 #include "bmengine/core/core.h"
-#include "bmengine/functions/linear.h"
 #include <thread>
 #include <iostream>
 

@@ -22,9 +22,9 @@ from typing import (
 )
 from transformers import AutoTokenizer
 from typing_extensions import TypedDict
-from .config import DistConfig
+from .config.adapter import ModelAdapter
+from .config.dist_config import DistConfig
 from .loader import ModelLoader, LLaMALoader
-from .dynamic_batch import DynamicBatchConfig, GeneratorArg, DynamicBatchGenerator
 from .quant import QuantConfig, QuantType, quant_config_to_c
 
 LLaMAInputType = Union[str, List[str]]
@@ -63,7 +63,6 @@ def _get_config(model_config) -> LLaMAModelConfig:
         "num_layers": 32,
         "dim_model": 4096,
         "num_heads": 32,
-        "dim_head": 128,
         "dim_ff": 11008,
         "vocab_size": 32000,
         "eps": 1e-6,
@@ -116,21 +115,20 @@ class LLaMA:
     def __init__(
         self,
         model_path: str,
-        vocab_path: str,
-        device_id: int = 0,
-        memory_limit: int = 0,
         model_config: Optional[LLaMAModelConfig] = None,
         quant_config: Optional[QuantConfig] = None,
         parallel: Union[DistConfig, int, bool] = 0,
         tokenizer=None,
+        device_id: int = -1,  # deprecated
+        memory_limit: int = 0,  # deprecated
         **kwargs
     ):
-        self._config = _get_config(LLaMALoader.adapt_hf_config(model_config))
+        self._config = _get_config(ModelAdapter.adapt(model_config))
         self._quant_config = QuantConfig.adapt_hf_config(quant_config, self._config)
         dist_config = DistConfig.adapt(parallel)
         print(f"dist_config: parallel={dist_config.parallel}")
 
-        self._init_tokenizer(vocab_path, tokenizer)
+        self._init_tokenizer(model_path, tokenizer)
 
         c_config = C.ModelConfig(self._config)
         c_quant_config = quant_config_to_c(self._quant_config)
@@ -147,18 +145,43 @@ class LLaMA:
             dist_config.parallel,
         )
 
-    def _init_tokenizer(self, vocab_path: str, tokenizer):
-        self.tokenizer_config = {}
+    def process_inputs(self, messages: List[dict]):
+        debug_feed_embedding = False
+        if debug_feed_embedding:
+            print("#################### process_inputs")
+            prompt = self._tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            token_ids = self._tokenizer.encode(prompt, add_special_tokens=False)
+            positions = list(range(0, len(token_ids)))
+            inputs_embeds = self._model.get_input_embeddings(token_ids)
+            # TODO: define a class instead of returning dict
+            return (token_ids,
+                    positions,
+                    inputs_embeds,
+                    None,
+                    )
+        return None
+
+    def _load_tokenizer_config(self, model_path: str):
+        tokenizer_config_path = f"{model_path}/tokenizer_config.json"
+        if os.path.exists(tokenizer_config_path):
+            self.tokenizer_config = json.load(open(tokenizer_config_path))
+        else:
+            self.tokenizer_config = {}
+
+    def _init_tokenizer(self, model_path: str, tokenizer):
+        self._load_tokenizer_config(model_path)
         if tokenizer is not None:
             self._tokenizer = tokenizer
             return
 
-        self._tokenizer = AutoTokenizer.from_pretrained(vocab_path)
-        self._tokenizer.bos_token_id = self._config.get("bos_token_id", None) or 1
-        self._tokenizer.eos_token_id = self._config.get("eos_token_id", None) or 2
-        tokenizer_config_path = f"{vocab_path}/tokenizer_config.json"
-        if os.path.exists(tokenizer_config_path):
-            self.tokenizer_config = json.load(open(tokenizer_config_path))
+        self._tokenizer = AutoTokenizer.from_pretrained(model_path)
+
+        self._tokenizer.bos_token_id = self._config.get("bos_token_id", 1)
+        conf_eos_token_id = self._config.get("eos_token_id", 2)
+        if isinstance(conf_eos_token_id, int):
+            self._tokenizer.eos_token_id = conf_eos_token_id
+        elif self._tokenizer.eos_token_id is None:
+            self._tokenizer.eos_token_id = 2
 
     def load_state_dict_pt(self, state_dict):
         import torch

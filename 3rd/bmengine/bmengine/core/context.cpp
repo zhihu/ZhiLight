@@ -464,6 +464,8 @@ void Context::assign_or_copy(Tensor* dst, const Tensor* src) const {
         return;
     }
     BM_ASSERT_EQ(src->shape(), dst->shape(), "src and dst have different shape");
+    if (src->dtype() != DataType::kInt16)
+        BM_ASSERT_EQ(src->dtype(), dst->dtype(), "src and dst have different dtype");
     // allocate memory
     if (dst->data() == nullptr) {
         init_parameter(dst->name(), dst);
@@ -509,9 +511,11 @@ Context::~Context() { }
 Context::Context(Context&&) = default;
 
 void Context::alloc_device(int idx) const {
+//    std::cout << "thread " << _get_tid() << " use device " << idx << endl;
     pimpl->use_device(idx);
 }
 void Context::release_device() const {
+//    std::cout << "thread " << _get_tid() << " release_device " << endl;
     pimpl->release_device();
 }
 bool Context::switch_to_device(int idx) const {
@@ -519,11 +523,13 @@ bool Context::switch_to_device(int idx) const {
         return false;
     }
     pimpl->check_in_same_thread();
+//    std::cout << "thread " << _get_tid() << " switch device from " << pimpl->active_device << " to " << idx << endl;
     if (pimpl->debug >= 2) {
         std::cerr << "Switch device from " << pimpl->active_device << " to " << idx
                   << std::endl;
     }
     if (pimpl->active_device != -1) {
+        std::cout << "WARNING active_device != -1\n";
         BM_CUDART_ASSERT(cudaStreamSynchronize(current_stream()->ptr));
         pimpl->release_device();
     }
@@ -691,12 +697,11 @@ void Context::load_parameter(
     auto it = state_dict.find(name);
     BM_ASSERT(it != state_dict.end(), "param " + name + " not found in state_dict");
     auto& param = it->second;
-    BM_ASSERT_EQ(weight->numel(), param.numel(), name + " shape mismatch");
     static bool print_param = std::getenv("PRINT_LOAD_PARAM") != nullptr;
     if (print_param) {
         std::cout << "Load " << name << ", shape=" << weight->shape() << ", srcShape=" << param.shape() << endl;
     }
-    BM_ASSERT_EQ(weight->shape(), param.shape(), "shape mismatch");
+    BM_ASSERT_EQ(weight->shape(), param.shape(), name +" shape mismatch");
 //    if (get_compute_capability() == 80) {
 //        if (rank() == 0)
 //            assign_or_copy(weight, &param);
@@ -856,6 +861,13 @@ void Context::mem_gc() {
     BM_ASSERT_EQ(1, pimpl->devices.size() == 1, "TP only");
     pimpl->allocators[0]->defragmentation();
 }
-} // namespace core
 
+GCStopper::GCStopper(const Context& ctx) : ctx(ctx) {
+    ctx.get_allocator()->set_allow_gc(false);
+}
+GCStopper::~GCStopper() {
+    ctx.get_allocator()->set_allow_gc(true);
+}
+
+} // namespace core
 } // namespace bmengine

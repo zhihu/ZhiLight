@@ -1,4 +1,6 @@
 #include "bind_internal.h"
+#include "internal_utils.h"
+
 #include <bmengine/core/core.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -86,7 +88,7 @@ at::Tensor tensor_to_aten(const Context& ctx, const Tensor& tensor) {
     return std::move(at_tensor);
 }
 
-void load_state_dict(
+void load_at_state_dict(
     bmengine::core::Context& ctx,
     const std::map<std::string, at::Tensor>& state_dict,
     std::map<const std::string, bmengine::core::Tensor*> named_params,

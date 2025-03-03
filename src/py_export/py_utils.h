@@ -17,7 +17,7 @@ void load_state_dict(
     std::map<const std::string, bmengine::core::Tensor*> named_params,
     bool parallel = false);
 
-const bmengine::core::Tensor numpy_to_tensor(const std::string& name, const py::array& arr);
+bmengine::core::Tensor numpy_to_tensor(const std::string& name, const py::array& arr, bool copy=false);
 
 std::map<std::string, const bmengine::core::Tensor> numpy_to_tensor(
     const std::map<std::string, py::array>& state_dict);

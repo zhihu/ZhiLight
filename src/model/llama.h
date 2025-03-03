@@ -3,6 +3,8 @@
 #include "model/model.h"
 #include "model/model_context.h"
 #include "nn/nn.h"
+#include "nn/position/rope_preparer.h"
+#include <memory>
 
 namespace model {
 
@@ -35,6 +37,9 @@ public:
         const core::Tensor& hidden_pass, // half (batch, len_q, dim_model)
         bool ln_output = true) = 0;
 
+    virtual core::Tensor get_input_embeddings(
+        ModelContext& ctx, const core::Tensor& ids) = 0;
+
     virtual core::Tensor get_logits(
         ModelContext& ctx, const core::Tensor& hidden, bool ln_input) = 0;
 
@@ -56,6 +61,7 @@ private:
     nn::LayerNorm ln_after_enc;
     nn::RawEmbedding lm_head;
     nn::RawEmbedding token_embedding;
+    std::unique_ptr<nn::RopePreparer> rope_preparer;
 
     BM_LAYER_DEF_PUBLIC(LLaMA);
 
@@ -84,6 +90,8 @@ private:
         const core::Tensor& placement,
         const core::Tensor& hidden_pass, // half (batch, len_q, dim_model)
         bool ln_output = true) override;
+
+    core::Tensor get_input_embeddings(ModelContext& ctx, const core::Tensor& ids) override;
 
     core::Tensor get_logits(ModelContext& ctx, const core::Tensor& hidden, bool ln_input) override;
 

@@ -2,6 +2,14 @@
 
 ✨ __ZhiLight__ ✨is a highly optimized LLM inference engine developed by Zhihu and ModelBest Inc. The "Zhi" in its name stands for **Z**hihu. ZhiLight can accelerate the inference of models like Llama and its variants, especially on PCIe-based GPUs. Compared to mainstream open-source inference engines, for example, vllm, it has significant performance advantages.
 
+## News 🔥
+* [2025/02] Support DeepSeek-V3/DeepSeek-R1 AWQ/GPTQ quantized model.
+* [2025/01] Support [DeepSeek-VL2](https://github.com/deepseek-ai/DeepSeek-VL2) multimodal models: deepseek-vl2-tiny, deepseek-vl2-small, deepseek-vl2.
+* [2025/01] Support LLaMA3 models: Llama-3.1-8B, Llama-3.1-70B, Llama-3.2-1B, Llama-3.2-3B, Llama-3.3-70B.
+
+## Roadmap
+see [Roadmap](https://github.com/zhihu/ZhiLight/wiki/Roadmap)
+
 ## 🎉🎉 Main Features
 
 * Asynchronous OpenAI compatible interface adapted from vllm
@@ -13,7 +21,7 @@
 * 🔥 Fused batch attention for decoding based on tensor core instructions
 * Support TP and PP on one node, TP is recommended
 * Support dynamic batch
-* Support flashatten prefill
+* Support flash attention prefill 
 * Support chunked prefill
 * Support prefix cache
 * Support Native INT8/SmoothQuant/FP8/AWQ/GPTQ quantization
@@ -107,7 +115,7 @@ Test Description:
 | **SGLang**        |**0.18** |**1514.49**|**2135.75**|  **28.5**|**47.28**|
 | ZhiLight            |     0.1 | 1574.85   | 2086.8    | 27.07    | 38.82   |
 
-more benchmarks can be found in [benchmarks.md](docs/benchmarks.md)
+more benchmarks can be found in [benchmarks](docs/benchmarks/benchmarks.md)
 
 ## License
 Apache License 2.0

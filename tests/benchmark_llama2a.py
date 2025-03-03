@@ -36,10 +36,7 @@ def load_model(model_path, quant=None, parallel=True, use_shm_cache=False):
     print(f"parallel={parallel} quant={quant}")
 
     model = LLaMA(
-        "",
         f"{model_path}",
-        -1,
-        memory_limit=0,
         model_config=model_config,
         quant_config=quant_config,
         parallel=parallel,

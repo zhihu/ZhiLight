@@ -8,6 +8,7 @@ from zhilight.server.openai.basic.outputs import RequestOutput
 from zhilight.server.openai.basic.sampling_params import SamplingParams
 from zhilight import LLaMA
 from zhilight.dynamic_batch import DynamicBatchGenerator, GeneratorArg
+from zhilight.models.auto_model import AutoModel, is_customized_model
 
 logger = init_logger(__name__)
 
@@ -21,36 +22,23 @@ class LLMEngine:
         self.log_stats = log_stats
 
         # Load model
-        if engine_config.is_cpm_directory_struct:
-            assert not engine_config.use_safetensors, "not support safetensors for old cpm load method."
-            self._instance = LLaMA(
-                model_path = engine_config.model_file,
-                vocab_path = engine_config.vocab_file,
-                device_id = -1,
-                memory_limit = 0,
-                model_config = engine_config.model_config,
-                quant_config = engine_config.quant_config,
-                load_model = False,
-                parallel = engine_config.enable_tensor_parallel,
-                is_chatml = engine_config.is_chatml,
-            )
-            self._instance.load_model_pt(engine_config.model_file)
+        if is_customized_model(engine_config.model_config.get("model_type")):
+            self._instance = AutoModel.from_pretrained(engine_config.model_path)
         else:
             self._instance = LLaMA(
-                model_path = "",
-                vocab_path = f"{engine_config.model_path}",
-                device_id = -1,
-                memory_limit = 0,
-                model_config = engine_config.model_config,
-                quant_config = engine_config.quant_config,
-                load_model = False,
-                parallel = engine_config.enable_tensor_parallel,
-                is_chatml = engine_config.is_chatml,
+                model_path=engine_config.model_path,
+                model_config=engine_config.model_config,
+                quant_config=engine_config.quant_config,
+                parallel=engine_config.enable_tensor_parallel,
             )
-            if engine_config.use_safetensors:
-                self._instance.load_model_safetensors(engine_config.model_path)
+            if engine_config.is_cpm_directory_struct:
+                assert not engine_config.use_safetensors, "not support safetensors for old cpm load method."
+                self._instance.load_model_pt(engine_config.model_file)
             else:
-                self._instance.load_model_pt(engine_config.model_path)
+                if engine_config.use_safetensors:
+                    self._instance.load_model_safetensors(engine_config.model_path)
+                else:
+                    self._instance.load_model_pt(engine_config.model_path)
         
         # Create dyn generator
         self.dyn_generator = DynamicBatchGenerator(
@@ -119,7 +107,7 @@ class LLMEngine:
                     f"top_p={arg.top_p}, top_k={arg.top_k}, presence_penalty={arg.presence_penalty}, "
                     f"num_results={arg.num_results}>")
 
-        stream = self.dyn_generator.stream_beam_search(prompt, arg)
+        stream = self.dyn_generator.stream_generate(prompt, arg)
         return stream
 
     def get_engine_config(self) -> EngineConfig:

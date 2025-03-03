@@ -1,3 +1,6 @@
+#include "bind_internal.h"
+#include "internal_utils.h"
+
 #include "nn/nn.h"
 #include "model/model.h"
 #include "utils/exception.h"
@@ -13,8 +16,6 @@
 #include <thread>
 #include <memory>
 #include <csignal>
-
-#include "bind_internal.h"
 
 namespace py = pybind11;
 
@@ -145,9 +146,11 @@ public:
         // auto d = ctx.with_device(0);
 
         std::vector<std::thread> threads;
-        py::array_t<float> ndarray;
         auto buf = input.request();
         auto ndim = input.ndim();
+        py::array_t<float> ndarray; // out
+        ndarray.resize(buf.shape); // must resize in main thread
+
         // bmengine::core::Tensor out_data;
         for (int i = 0; i < engine->num_gpus(); ++i) {
             threads.emplace_back([this, i, &buf, ndim, &ndarray] {
@@ -165,7 +168,6 @@ public:
                 auto out_data = mds[i]->forward(ctx, t_input);
                 // std::cout << out_data << std::endl;
                 if (i == 0) {
-                    ndarray.resize(out_data.size());
                     auto converted = model::convert_fp32(ctx, out_data);
                     converted.to_buffer(ndarray.mutable_data());
                 }
@@ -229,9 +231,8 @@ public:
 
                 auto named_params = mds[i]->named_parameters("ff", true);
                 for (auto it : named_params) {
-                    auto tmp = it.second->to_device(ctx.active_device());
                     if (i == 0) {
-                        auto converted = model::convert_fp32(ctx, tmp);
+                        auto converted = model::convert_fp32(ctx, *it.second);
                         res_tensors.emplace(it.first, std::move(converted));
                     }
                 }

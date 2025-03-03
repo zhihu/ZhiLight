@@ -64,12 +64,8 @@ def main():
     model_config["new_vocab"] = True
 
     model = LLaMA(
-        "",
         f"{model_path}/vocabs.txt",
-        -1,
-        memory_limit=80000 * 1024 * 1024,
         model_config=model_config,
-        load_model=False,
         parallel=True,
     )
     load_llama_cache(model, model_path)

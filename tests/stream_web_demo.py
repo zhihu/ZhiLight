@@ -328,13 +328,9 @@ def load_model(model_path):
 
     t0 = time.time()
     model = LLaMA(
-        "",
         f"{model_path}",
-        -1,
-        memory_limit=0,
         model_config=model_config,
         quant_config=None,
-        load_model=False,
         parallel=parallel,
     )
     model.load_model_pt(model_path)

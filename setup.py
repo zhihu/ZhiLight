@@ -110,7 +110,7 @@ ext_modules = [
 testing = int(os.environ.get("TESTING", 1))
 
 if testing:
-    ext_modules.append(CMakeExtension("zhilight.C", "internals_"))
+    ext_modules.append(CMakeExtension("zhilight.internals_", "internals_"))
 
 # 移步version.py里去修改__version__
 from version import __version__

@@ -101,12 +101,13 @@ public:
 
     model::ModelContext create_ctx(int dev, model::LLaMA* model, int batch_size = 1) {
         bmengine::core::Context c_ctx = is_parallel() ?
-                                        engine()->create_context({dev }) :
+                                        engine()->create_context({ dev }) :
                                         engine()->create_context();
         return model::ModelContext(std::move(c_ctx), *model, batch_size, is_parallel());
     }
 
     void run(std::function<void(int)> fn) {
+        py::gil_scoped_release release;
         if (is_parallel()) {
             engine()->device_foreach(fn);
         } else {
@@ -158,6 +159,27 @@ public:
         return dict;
     }
 
+    py::array get_input_embeddings(py::list data_list) {
+        if (!loaded_) throw std::runtime_error("Model is not loaded!!!");
+        std::vector<int> h_ids = bind::to_int_vector(data_list);
+        py::array_t<float> out_emb({h_ids.size(), size_t(models_[0]->dim_model)});
+        std::map<std::string, std::vector<float>> map;
+        auto fn = [&, this](int i) {
+            model::LLaMA* model = dynamic_cast<model::LLaMA*>(get_model(i));
+            auto ctx = create_ctx(i, model);
+            auto d = ctx.with_device(0);
+
+            Tensor ids = ctx.tensor_of(h_ids);
+            Tensor embeddings = model->get_input_embeddings(ctx, ids);
+            BM_ASSERT_EQ(embeddings.size(-1), models_[0]->dim_model, "dim mismatch");
+            if (!is_parallel() || ctx.rank() == 0) {
+                model::convert_fp32(ctx, embeddings).to_buffer(out_emb.mutable_data());
+            }
+        };
+        run(fn);
+        return out_emb;
+    }
+
     void load_with_smooth_quant(
         NumpyMap& state_dict, NumpyMap& scale_dict,
         float alpha,
@@ -187,6 +209,7 @@ namespace bind {
 void define_llama(py::module_& m) {
     py::class_<PyLLaMA, PyModelBase>(m, "LLaMA")
         .def(py::init(&PyLLaMA::create))
+        .def("get_input_embeddings", &PyLLaMA::get_input_embeddings)
         .def("load_state_dict", &PyLLaMA::load_state_dict)
         .def("load_with_smooth_quant", &PyLLaMA::load_with_smooth_quant)
         .def("calc_act_scales", &PyLLaMA::calc_act_scales);

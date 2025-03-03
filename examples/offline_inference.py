@@ -10,13 +10,9 @@ model_path = "./Qwen2.5-72B-Instruct-GPTQ-Int4"
 model_config = LLaMALoader.load_llama_config(model_path)
 
 model = LLaMA(
-    model_path = "",
-    vocab_path = model_path,
-    device_id = -1,
-    memory_limit = 0,
+    model_path = model_path,
     model_config = model_config,
     quant_config = None,
-    load_model = False,
     parallel = True,
 )
 

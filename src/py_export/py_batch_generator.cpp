@@ -81,6 +81,20 @@ public:
         task_->canceled = true;
     }
 
+    // pass in extra fields for some special models
+    void set_position_ids(py::list ids) {
+        task_->position_ids = bind::to_int_vector(ids);
+    }
+    void set_position_delta(int delta) {
+        task_->position_delta = delta;
+    }
+    void set_input_embeddings(py::array data) {
+        task_->input_embeddings = bind::numpy_to_tensor("input_embeddings", data, true);
+    }
+    void set_logit_bias(std::map<int, float> &bias) {
+        task_->logit_bias = bias;
+    }
+
     generator::SearchResults pop_res(float timeout) {
         return task_->res_queue.pop_timeout(timeout);
     }
@@ -129,7 +143,8 @@ public:
     shared_ptr<BatchGenerator> searcher_;
 
     static shared_ptr<PyBatchGenerator> create(DynBatchConfig& config, PyModelBase* py_model) {
-        // std::cerr << "py_model->model()->layer_type() " << py_model->model()->layer_type() << "\n";
+        if (!py_model->is_loaded()) throw std::runtime_error("Model is not loaded!!!");
+
         shared_ptr<PyBatchGenerator> self = std::make_shared<PyBatchGenerator>();
         self->searcher_ = std::make_shared<BatchGenerator>(
             config, py_model->par_models(), py_model->engine());
@@ -295,6 +310,10 @@ void define_dynamic_batch(py::module_& m) {
         .def("input_tokens_num", &PySearchTask::input_tokens_num)
         .def("output_tokens_nums", &PySearchTask::output_tokens_nums)
         .def("cancel", &PySearchTask::cancel)
+        .def("set_position_ids", &PySearchTask::set_position_ids)
+        .def("set_input_embeddings", &PySearchTask::set_input_embeddings)
+        .def("set_position_delta", &PySearchTask::set_position_delta)
+        .def("set_logit_bias", &PySearchTask::set_logit_bias)
         .def(py::init(&PySearchTask::create));
 
     py::class_<PyBatchGenerator, shared_ptr<PyBatchGenerator>>(m, "BatchGenerator")

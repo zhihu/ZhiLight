@@ -12,13 +12,9 @@ def main(model_path):
     t0 = time.time()
     model_config = LLaMALoader.load_llama_config(model_path)
     model = LLaMA(
-        "",
-        f"{model_path}",
-        0,
-        memory_limit=0,
+        model_path,
         model_config=model_config,
         quant_config=None,
-        load_model=False,
         parallel=False,
     )
     # model.load_model_pt(model_path)
@@ -28,7 +24,7 @@ def main(model_path):
     arg = GeneratorArg(
         beam_size=1,
         max_length=100,
-        repetition_penalty=1.02,
+        repetition_penalty=1.0,
     )
     with DynamicBatchGenerator(DynamicBatchConfig(), model) as generator:
         text = "<s>[INST] What is your favourite condiment? [/INST]"
@@ -37,5 +33,4 @@ def main(model_path):
 
 
 if __name__ == "__main__":
-    # main("/mnt/data//user/tc_agi/user/gaojunmin/mistralai/Mistral-7B-Instruct-v0.2")
     main("/dev/shm/Mistral-7B-Instruct-v0.2")

@@ -100,7 +100,7 @@ public:
           gemm_score_v(ctx, dtype, false, false),
           transpose(ctx),
           flash_decoding(ctx) {
-        if (cfg.model_type == "qwen2" || cfg.model_type == "qwen2_moe") {
+        if (cfg.model_type == "qwen2" || cfg.model_type == "qwen2_moe" || cfg.model_type == "qwen2_vl") {
             project_q.set_has_bias(true);
             project_k.set_has_bias(true);
             project_v.set_has_bias(true);
@@ -635,6 +635,7 @@ void Attention::impl::NormalImpl::attn_search_rag(
         quant_v = int8_op::quant_calc_scale(ctx, h_v_s, 127, 128);
     }
     int layer = ctx.current_layer();
+    auto gc_stopper = std::make_unique<core::GCStopper>(ctx); // Stop gc to make sure buffer k/v address's are valid
     Tensor buf_k_addr = rag_buffer->buf_k_addr(ctx, layer); // (batch) => (num_kv_heads, len_buf, dim_head)
     Tensor buf_v_addr = rag_buffer->buf_v_addr(ctx, layer); // (batch) => (num_kv_heads, len_buf, dim_head)
     Tensor scale_k_addr = rag_buffer->scale_k_addr(ctx, layer);
@@ -716,6 +717,7 @@ void Attention::impl::NormalImpl::attn_search_rag(
 //        }
         return;
     }
+    gc_stopper.reset();
 
     auto h_q_t = transpose_q(ctx, h_q, len_q, event_level)
         .view({ batch, num_kv_heads, num_head_groups * len_q, dim_head });
@@ -812,7 +814,16 @@ Tensor Attention::impl::NormalImpl::dynamic_batch_forward(
         // fuse Q, K, V
         auto a = linear_qkv->forward(ctx, hidden_q); // (group_len_q, (num_heads + 2 * num_kv_heads) * dim_head)
         BM_ASSERT_EQ(a.size(-1), (num_heads + 2 * num_kv_heads) * dim_head, "");
-        if (rotary_embedding.is_normal()) {
+        if (dyn_batch->rope_cache.cos.numel() > 0) {
+            if (ctx.is_layer(1000)) std::cout << "rope_qk_cache\n";
+            rope_qk_cache(ctx,
+                          dyn_batch->rope_cache.cos,
+                          dyn_batch->rope_cache.sin,
+                          a,
+                          g_h_q, g_h_k, g_h_v,
+                          num_heads, num_kv_heads, dim_head, dtype,
+                          rotary_embedding.is_neox_style());
+        } else if (rotary_embedding.is_normal() && rotary_embedding.is_neox_style()) {
         rotary_embedding_qk(ctx, position_bias, a, g_h_q, g_h_k, g_h_v, num_heads, num_kv_heads, dim_head, rope_theta, dtype);
         } else {
             // if (ctx.is_layer(1)) std::cout << "Split to rotary_embedding\n";

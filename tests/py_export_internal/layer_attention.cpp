@@ -1,3 +1,6 @@
+#include "bind_internal.h"
+#include "internal_utils.h"
+#include "layer_base.hpp"
 
 #include <bmengine/core/core.h>
 #include <pybind11/pybind11.h>
@@ -13,19 +16,16 @@
 #include <torch/extension.h>
 #include <ATen/ATen.h>
 
-#include "nn/nn.h"
-#include "model/model.h"
-#include "utils/exception.h"
-#include "py_export/py_utils.h"
-#include "bind_internal.h"
-#include "internal_utils.h"
-#include "layer_base.hpp"
 #include "kvcache/transformer_buffer.h"
 #include "kvcache/paged_kvcache.h"
+#include "model/model.h"
+#include "nn/nn.h"
+#include "utils/exception.h"
+#include "py_export/py_utils.h"
+
 
 namespace py = pybind11;
-using kvcache::PageConfig;
-using kvcache::PagedKVCache;
+using kvcache::TransformerBuffer;
 
 class PyAttention : public PyLayerBase<nn::Attention> {
 private:
@@ -39,10 +39,6 @@ public:
         int dim_model,
         int num_heads,
         int dim_head,
-        std::string pos_bias_type,
-        int quant,
-        bool scale_weights = false,
-        bool weight_transposed = true,
         bool parallel = false) {
         model::ModelConfig model_config(
             "",
@@ -54,12 +50,6 @@ public:
             0,
             1e-6,
             -1,
-            {},
-            scale_weights,
-            weight_transposed,
-            0,
-            1.0,
-            1.0,
             bmengine::core::DataType::kHalf);
         auto layer = PyAttention(model_config, parallel);
         return layer;
@@ -82,20 +72,24 @@ public:
 
         // int len_buf = round_up(t_input.size(1), 32);
         int len_buf = t_mask.size(-1);
-        PageConfig page_config { 128, 16 };
-        PagedKVCache kv_cache(
-            page_config,
+        TransformerBuffer buf_k(
+            t_input.size(0),
             1,
             model_config.num_heads,
             model_config.dim_head,
             bmengine::core::DataType::kHalf,
-            true);
-        for (size_t i = 0; i < t_input.size(0); i++) {
-            std::vector<int32_t> h_seq(t_input.size(1));
-            std::iota(h_seq.begin(), h_seq.end(), i * t_input.size(1));
-            kv_cache.add_sequence(*ctx, h_seq);
-        }
-
+            true,
+            t_seqlens_kv.numel() != 0);
+        TransformerBuffer buf_v(
+            input.size(0),
+            1,
+            model_config.num_heads,
+            model_config.dim_head,
+            bmengine::core::DataType::kHalf,
+            true,
+            t_seqlens_kv.numel() != 0);
+        buf_k.resize(*ctx, len_buf);
+        buf_v.resize(*ctx, len_buf);
         auto res = layer->forward(
             *ctx,
             t_input,
@@ -103,9 +97,9 @@ public:
             t_position,
             t_seqlens_q,
             t_seqlens_kv,
-            &(kv_cache.key_cache(0)),
-            &(kv_cache.value_cache(0)),
-            kv_cache.block_table(0),
+            &(buf_k[0]),
+            &(buf_v[0]),
+            nullptr,
             nullptr,
             nullptr);
 
