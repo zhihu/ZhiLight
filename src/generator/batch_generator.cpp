@@ -58,7 +58,9 @@ using RagVector = vector<vector<T>>; // sub-vector has different size.
 int pthread_setname_np(pthread_t thread, const char *name) {}
 #endif
 
-len_t round_up_len(len_t len, len_t d = 32) {
+static const int INCR_SIZE = 64;
+
+len_t round_up_len(len_t len, len_t d = INCR_SIZE) {
     return (len + d - 1) / d * d;
 }
 
@@ -125,7 +127,7 @@ vector<SearchTask> TaskQueue::pop_multi(int limit, bool wait, int require, int m
         }
         while (!queue_.empty() && tasks.size() < limit) {
             total_token_len += pre_alloc
-                ? round_up_len(queue_.front()->full_length() + 2, 32)
+                ? round_up_len(queue_.front()->full_length() + 2, INCR_SIZE)
                 : queue_.front()->input_length();
             if (total_token_len > max_token) {
 //                std::cout << "#### max_token: " << max_token
@@ -763,10 +765,10 @@ public:
             bm[b].reset(len_buf); // global len_buf
         } else {
             // individual len_buf
-            len_t new_len_buf = round_up_len(task->input_length() + 2, 32);
+            len_t new_len_buf = round_up_len(task->input_length() + 2, INCR_SIZE);
             bm[b].reset(new_len_buf);
             if (pre_alloc) {
-                len_t full_len_buf = round_up_len(task->full_length() + 2, 32);
+                len_t full_len_buf = round_up_len(task->full_length() + 2, INCR_SIZE);
                 resize_task_buf(b, full_len_buf, true);
             } else {
                 resize_task_buf(b, new_len_buf); // alloc new
@@ -884,7 +886,7 @@ void SearcherImplV1<TokenT, ResultT>::resize_rag_buf() {
     }
     while (swap_count > 0) {
         len_t e = max_batch_active;
-        if (total_len_buf + bm[e].len_buf + 32 < max_buf_token_num) {
+        if (total_len_buf + bm[e].len_buf + INCR_SIZE < max_buf_token_num) {
             // std::cout << "Swap in task " << e << "\n";
             load_task_buf(e);
             len_t b = e;
@@ -905,9 +907,9 @@ void SearcherImplV1<TokenT, ResultT>::resize_rag_buf() {
 template <typename TokenT, typename ResultT>
 len_t SearcherImplV1<TokenT, ResultT>::calc_new_len_buf(len_t new_beam_size) {
     len_t max_new_input_len = calc_max_input_len(new_tasks);
-    len_t round_size = 32;
+    len_t round_size = INCR_SIZE;
     len_t new_len_buf = round_up_len(max_new_input_len + 2, round_size);
-    BM_ASSERT(config.max_beam_size < round_size, "max_beam_size to big");
+    BM_ASSERT(config.max_beam_size < 32, "max_beam_size to big");
 
     // resize buf if necessary to hold next step tokens
     for (len_t b = 0; b < max_batch_active; ++b) {
@@ -1031,7 +1033,7 @@ void SearcherImplV1<int, int>::fill_encode_input(vector<SearchTask>& new_tasks) 
         full_input_lens[i] = token_num;
         if (chunking)
             full_input_lens[i] = chunked;
-        len_t len1 = round_up_len(encode_len, 32);
+        len_t len1 = round_up_len(encode_len, INCR_SIZE);
         buf_lens[i] = (len1 <= len_buf / 2 || (len1 + 256) <= len_buf) ? len1 : len_buf;
         buf_lens[i] = config.rag_buffer ? bm[b].len_buf : buf_lens[i];
 
