@@ -51,6 +51,8 @@ class Attention::impl::MLAImpl : public Attention::impl {
 
     RotaryEmbedding rotary_emb;
     FlashDecoding flash_decoding;
+    functions::Gemm gemm;
+    functions::Gemm gemm_transB;
 
     LinearPtr q_proj;
     LinearPtr q_a_proj;
@@ -104,7 +106,9 @@ public:
       attn_scale(1. / sqrt(qk_head_dim)),
       v_head_dim(cfg.v_head_dim),
       rotary_emb(ctx, cfg),
-      flash_decoding(ctx)
+      flash_decoding(ctx),
+      gemm(ctx, dtype, false, false),
+      gemm_transB(ctx, dtype, false, true)
     {
         if (cfg.rope_cfg.mscale_all_dim > 0.) {
             double mscale = yarn_get_mscale(cfg.rope_cfg.factor, cfg.rope_cfg.mscale_all_dim);
@@ -137,6 +141,10 @@ public:
         BM_ASSERT(num_kv_heads % ctx.world_size() == 0,"num_kv_heads must be dividable by world_size");
         this->num_heads = num_heads / ctx.world_size();
         this->num_kv_heads = num_kv_heads / ctx.world_size();
+
+        // TODO: check this
+        gemm.set_compute_type(CUBLAS_COMPUTE_32F);
+        gemm_transB.set_compute_type(CUBLAS_COMPUTE_32F);
     }
 
     void split_out(const core::Context& ctx, const LinearPtr& full, LinearPtr& part) {
@@ -376,6 +384,15 @@ public:
         Tensor q,              // (input_len, num_heads, nope_head_dim + pe_head_dim)
         Tensor compressed_kv,  // (input_len, lora_rank + pe_head_dim)
         Tensor attn_output  // (input_len, num_heads * dim_head)
+    );
+    void attn_by_gemm(
+        model::ModelContext& ctx,
+        model::DynBatchContext* dyn_batch,
+        const Tensor& q_adj,          // (len_q, num_heads, cache_dim)
+        const Tensor& compressed_kv,  // (len_buf, 1, cache_dim)
+        const Tensor& mask,
+        Tensor& attn_score,
+        Tensor attn_result            // (len_q, num_heads, kv_lora_rank)
     );
 
     Tensor get_compressed_kv_v1(const core::Context& ctx, const Tensor& h, const Tensor& position) {
@@ -670,6 +687,48 @@ void Attention::impl::MLAImpl::copy_to_compressed_cache(
     ctx.recordEvent("End->copy_to_rag_buffer", 4);
 }
 
+void Attention::impl::MLAImpl::attn_by_gemm(
+    model::ModelContext& ctx,
+    model::DynBatchContext* dyn_batch,
+    const Tensor& q_adj,          // (len_q, num_heads, cache_dim)
+    const Tensor& compressed_kv,  // (len_buf, 1, cache_dim)
+    const Tensor& mask,
+    Tensor& attn_score,
+    Tensor attn_result            // (len_q, num_heads, kv_lora_rank)
+) {
+    BM_ASSERT_EQ(q_adj.ndim(), 3, "q_adj is not 3d");
+    BM_ASSERT_EQ(compressed_kv.ndim(), 3, "compressed_kv is not 3d");
+    BM_ASSERT(compressed_kv.size(0) == 1 || compressed_kv.size(1) == 1, "num_head_k is not 1");
+    size_t num_heads = q_adj.size(1);
+    size_t cache_dim = kv_lora_rank + pe_head_dim; // 576
+    size_t len_q = q_adj.size(0);
+    Tensor kv = compressed_kv.squeeze();
+    size_t len_buf = kv.size(0);
+
+    ctx.recordEvent("Q_Adj*Cache", event_level + 1);
+    // (num_heads, len_q, cache_dim）* (len_buf, cache_dim) => (num_heads, len_q, len_buf)
+    attn_score = gemm_transB.forward(ctx, q_adj, kv);
+
+    // attn_softmax in-place update attn_score
+    Tensor attn_score_q = attn_score.view({num_heads, len_q, len_buf});
+    ctx.recordEvent("attn_softmax", event_level + 1);
+    attn_softmax(ctx, attn_scale, attn_score_q, mask, Tensor());
+    if (ctx.debug() > 4) {
+        std::cout << "#### ADJ attn_scores: " << attn_score << endl;
+    }
+
+    // Score * V
+    ctx.recordEvent("Score*Cache", event_level + 1);
+    Tensor kv_lora = kv.virtual_slice(0, kv_lora_rank);
+    Tensor v_ext = gemm( // 2D gemm
+        ctx,
+        attn_score, // (num_heads, len_q, len_buf)
+        kv_lora, // (len_buf, kv_lora_rank)
+        &attn_result); // (len_q, num_heads, kv_lora_rank)
+    // v_ext = transpose_2_1(ctx, v_ext); // (len_q, H, kv_lora_rank+)
+    // functions::copy_last_dim(stream, v_ext, attn_results[i], 0, kv_lora_rank);
+}
+
 void Attention::impl::MLAImpl::search_compressed_cache(
     model::ModelContext& ctx,
     model::DynBatchContext* dyn_batch,
@@ -693,10 +752,6 @@ void Attention::impl::MLAImpl::search_compressed_cache(
 
     q = q.view({batch_len_q, num_heads, qk_head_dim});
     auto [q_nope, q_pe] = split(ctx, q, nope_head_dim, pe_head_dim);
-    functions::Gemm gemm(ctx, dtype, false, false); // batched
-    functions::Gemm gemm_transB(ctx, dtype, false, true); // batched
-    gemm.set_compute_type(CUBLAS_COMPUTE_32F);
-    gemm_transB.set_compute_type(CUBLAS_COMPUTE_32F);
 
     // q_adj
     // TODO: gemm w/o split by adjust stride
@@ -735,7 +790,8 @@ void Attention::impl::MLAImpl::search_compressed_cache(
             attn_scale,
             dyn_batch->get_max_len_buf(),
             v_attn,
-            num_heads);
+            num_heads,
+            -1);
     } else {
         // q_adj = transpose_2_1(ctx, q_adj); // (batch, num_heads, len_q, kv_lora_rank + pe_dim)
         auto q_adj_chunk = q_adj.chunk();
@@ -743,39 +799,9 @@ void Attention::impl::MLAImpl::search_compressed_cache(
         vector<Tensor> attn_results = v_attn.chunk();
         auto stream = ctx.current_stream()->ptr;
         for (size_t i = 0; i < batch; ++i) {
-            Tensor compressed_kv = ctx.rag_buffer()->buf_k(i, ctx.current_layer()); // (len_buf, 1, cache_dim)
-            size_t len_buf = compressed_kv.size(ctx.is_BSHD() ? -3 : -2);
-            compressed_kv = compressed_kv.view({len_buf, cache_dim});
-
-            // Q * K
-            if (ctx.debug() > 4) {
-                auto[kv_a, k_pe] = split(ctx, compressed_kv, kv_lora_rank, pe_head_dim);
-                Tensor attn_w1 = gemm_transB.forward(ctx, q_adj_nope1, kv_a);
-                std::cout << "#### ADJ attn_w1: " << attn_w1 << endl;
-            }
-            ctx.recordEvent("Q_Adj*Cache", event_level + 1);
-            // (num_heads, len_q, kv_lora_rank+）* (len_buf, kv_lora_rank+) => (num_heads, len_q, len_buf)
-            attn_scores[i] = gemm_transB.forward(ctx, q_adj_chunk[i], compressed_kv);
-
-            // attn_softmax in-place update attn_score
-            Tensor attn_score_q = attn_scores[i].view({num_heads, len_q, len_buf});
+            Tensor kv = ctx.rag_buffer()->buf_k(i, ctx.current_layer()); // (len_buf, 1, cache_dim)
             Tensor mask = dyn_batch->search_mask(ctx, i, len_q);
-            ctx.recordEvent("attn_softmax", event_level + 1);
-            attn_softmax(ctx, attn_scale, attn_score_q, mask, Tensor());
-            if (ctx.debug() > 4) {
-                std::cout << "#### ADJ attn_scores: " << attn_scores[i] << endl;
-            }
-
-            // Score * V
-            ctx.recordEvent("Score*Cache", event_level + 1);
-            Tensor kv_lora = compressed_kv.virtual_slice(0, kv_lora_rank);
-            Tensor v_ext = gemm( // 2D gemm
-                ctx,
-                attn_scores[i], // (num_heads, len_q, len_buf)
-                kv_lora, // (len_buf, kv_lora_rank)
-                &attn_results[i]); // (len_q, num_heads, kv_lora_rank)
-            // v_ext = transpose_2_1(ctx, v_ext); // (len_q, H, kv_lora_rank+)
-            // functions::copy_last_dim(stream, v_ext, attn_results[i], 0, kv_lora_rank);
+            attn_by_gemm(ctx, dyn_batch, q_adj_chunk[i], kv, mask, attn_scores[i], attn_results[i]);
         }
     }
 
@@ -829,10 +855,6 @@ core::Tensor Attention::impl::MLAImpl::forward_compressed_data_parallel(
     if (start < end) {
         Tensor ret = batch_ret.slice_dim0(start, end);
         size_t cur_batch = end - start;
-        functions::Gemm gemm(ctx, dtype, false, false); // batched
-        functions::Gemm gemm_transB(ctx, dtype, false, true); // batched
-        gemm.set_compute_type(CUBLAS_COMPUTE_32F);
-        gemm_transB.set_compute_type(CUBLAS_COMPUTE_32F);
 
         // Step 2: q up
         Tensor q_a_part = q_a.slice_dim0(start, end);
@@ -857,29 +879,12 @@ core::Tensor Attention::impl::MLAImpl::forward_compressed_data_parallel(
         auto q_adj_chunk = q_adj.chunk();
         for (int j = 0; j < end - start; ++j) {
             int i = start + j;
-            Tensor q = q_part.slice_dim0_len(j, 1);
-            Tensor compressed_kv = ctx.rag_buffer()->buf_k(i, ctx.current_layer()); // (len_buf, 1, cache_dim)
-            size_t len_buf = compressed_kv.size(ctx.is_BSHD() ? -3 : -2);
-            compressed_kv = compressed_kv.view({len_buf, cache_dim});
-
-            ctx.recordEvent("Q_Adj*Cache", event_level);
-            // (H, len_q, kv_lora_rank+）* (len_buf, kv_lora_rank+) => (H, len_q, len_buf)
-            Tensor attn_score = gemm_transB.forward(ctx, q_adj_chunk[j], compressed_kv);
-
-            // attn_softmax in-place update attn_score
-            ctx.recordEvent("attn_softmax", event_level);
-            Tensor attn_score_q = attn_score.view({H, len_q, len_buf});
+            Tensor q_adj_i = q_adj_chunk[i].view({len_q, H, kv_lora_rank + pe_head_dim});
+            Tensor kv_i = ctx.rag_buffer()->buf_k(i, ctx.current_layer()); // (len_buf, 1, cache_dim)
             Tensor mask = dyn_batch->search_mask(ctx, i, len_q);
-            attn_softmax(ctx, attn_scale, attn_score_q, mask, Tensor());
-
-            // Score * V
-            ctx.recordEvent("Score*Cache", event_level);
-            Tensor kv_lora = compressed_kv.virtual_slice(0, kv_lora_rank);
-            Tensor v_ext = gemm( // 2D gemm
-                ctx,
-                attn_score, // (num_heads, len_q, len_buf)
-                kv_lora, // (len_buf, kv_lora_rank)
-                &attn_results[j]); // (len_q, num_heads, kv_lora_rank)
+            Tensor attn_score;
+            Tensor attn_out = attn_results[i].view({len_q, H, kv_lora_rank});
+            attn_by_gemm(ctx, dyn_batch, q_adj_i, kv_i, mask, attn_score, attn_out);
         }
 
         Tensor attn_output = ctx.tensor({cur_batch * len_q, H * v_head_dim}, dtype);
@@ -917,14 +922,19 @@ core::Tensor Attention::impl::MLAImpl::dynamic_batch_forward(
     BM_ASSERT_EQ(hidden_states.ndim(), 2, "");
     size_t num_enc = dyn_batch->e_placement.numel();
     size_t num_s = dyn_batch->s_placement.numel();
-    if (data_parallel && ctx.latent_cache() && num_enc == 0 && num_s >= 1 && dyn_batch->s_placement.size(1) == 1) {
+    size_t len_q = dyn_batch->s_placement.size(1);
+    // TODO: check len_q > 1
+    static int data_parallel_min_batch = utils::get_int_env("ATTN_DATA_PARALLEL_MIN_BATCH", 1);
+    if (data_parallel && ctx.latent_cache() &&
+        num_enc == 0 && num_s >= data_parallel_min_batch &&
+        len_q == 1) {
         return forward_compressed_data_parallel(ctx, hidden_states, position, output);
     }
     if (ctx.latent_cache()) {
         return forward_compressed_cache(ctx, hidden_states, position, output);
     }
 
-    size_t len_q = hidden_states.numel() / hidden_states.size(-1);
+    len_q = hidden_states.numel() / hidden_states.size(-1);  // group_len_q
     cudaStream_t stream = ctx.current_stream()->ptr;
     // Step 1: q
     Tensor q = forward_q(ctx, hidden_states); // (len_q, num_heads, qk_head_dim)
@@ -1048,6 +1058,7 @@ void Attention::impl::MLAImpl::attn_encode_group(
         functions::copy_last_dim(stream, ret, attn_value_enc, 0, v_head_dim);
     } else {
         functions::Gemm gemm_transB(ctx, dtype, false, true);
+        // TODO: compute type
         functions::Gemm gemm_score_v(ctx, dtype, false, false);
         // Q * K
         ctx.recordEvent("Q*K", 3);
