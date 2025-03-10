@@ -1,4 +1,4 @@
-# ZhiLight大模型推理引擎
+# ZhiLight
 
 ✨ __ZhiLight__ ✨is a highly optimized LLM inference engine developed by Zhihu and ModelBest Inc. The "Zhi" in its name stands for **Z**hihu. ZhiLight can accelerate the inference of models like Llama and its variants, especially on PCIe-based GPUs. Compared to mainstream open-source inference engines, for example, vllm, it has significant performance advantages.
 
