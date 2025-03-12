@@ -12,6 +12,9 @@
 #include <thread>
 #include <queue>
 #include <vector>
+#include <boost/archive/text_oarchive.hpp>
+#include <boost/archive/text_iarchive.hpp>
+#include <boost/serialization/vector.hpp>
 
 namespace batch_generator {
 
@@ -48,6 +51,30 @@ struct SearchTask_ {
 
     std::map<int, float> logit_bias;
 
+    friend class boost::serialization::access;
+
+    template<class Archive>
+    void serialize(Archive & ar, const unsigned int version) {
+        ar & input_tokens;
+        ar & beam_size;
+        ar & max_length;
+        ar & presence_penalty;
+        ar & repetition_penalty;
+        ar & ngram_penalty;
+        ar & diverse;
+        ar & seed;
+        ar & temperature;
+        ar & num_results;
+        ar & top_p;
+        ar & top_k;
+        ar & top_logprobs;
+        ar & stream;
+        ar & position_ids;
+        ar & input_embeddings;
+        ar & position_delta;
+        ar & logit_bias;
+    }
+
 public:
     void finish(generator::SearchResults&& results);
     void update_stream(const generator::SearchResults& results);
@@ -59,6 +86,8 @@ public:
     }
     bool is_random() const { return top_p < 1. or top_k > 0; }
 };
+
+BOOST_SERIALIZATION_ASSUME_ABSTRACT(SearchTask_);
 
 typedef shared_ptr<SearchTask_> SearchTask;
 

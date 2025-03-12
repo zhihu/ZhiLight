@@ -29,7 +29,7 @@ private:
 
     int active_device;
     EngineImpl* engine;
-    std::vector<int> devices;
+    std::vector<int> devices; // 这里控制一个TP rank的显卡数，可扩展性不强，PP这里是所有显卡数
     int rank_;
     size_t used_memory;
     size_t peak_memory;

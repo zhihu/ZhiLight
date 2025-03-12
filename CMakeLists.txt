@@ -71,6 +71,11 @@ execute_process(
 	OUTPUT_STRIP_TRAILING_WHITESPACE)
 find_package(pybind11 REQUIRED)
 
+find_package(Boost 1.71.0 REQUIRED COMPONENTS serialization)
+if(NOT Boost_FOUND OR NOT TARGET Boost::serialization)
+    message(FATAL_ERROR "Could not find required component Boost::serialization of the Boost library.")
+endif()
+
 file(GLOB_RECURSE BACKEND_SOURCES
     "src/*.cpp"
     "src/*.cu"
@@ -93,6 +98,7 @@ target_include_directories(backend
     PUBLIC ${NCCL_INCLUDE_DIRS}
     PUBLIC ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
     PUBLIC ${Python_SITELIB}/torch/include
+    PUBLIC ${Boost_INCLUDE_DIRS}
 )
 
 target_link_directories(backend
@@ -100,10 +106,11 @@ target_link_directories(backend
     PUBLIC ${NCCL_LIBRARIES}
     PUBLIC ${Python_SITELIB}/torch/lib
     PUBLIC ${Python_SITELIB}
+    PUBLIC ${Boost_LIBRARY_DIRS}
 )
 
 target_link_libraries(backend
-    PUBLIC bmengine
+    PUBLIC bmengine Boost::serialization
     "-Wl,-Bsymbolic -Wl,-Bsymbolic-functions"
     ":${FLASH_ATTN_SO}"
 )

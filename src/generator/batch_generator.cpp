@@ -142,6 +142,9 @@ vector<SearchTask> TaskQueue::pop_multi(int limit, bool wait, int require, int m
     }
     if (!tasks.empty())
         can_push_cond_.notify_one();
+    std::ofstream ofs("tasks.txt");
+    boost::archive::text_oarchive oa(ofs);
+    oa << tasks;
     return tasks;
 }
 
@@ -417,7 +420,7 @@ class SearcherImplV1 {
     DynBatchConfig config;
     BatchGenerator* searcher;
 
-    vector<SearchTask> tasks;
+    vector<SearchTask> tasks;  // batch tasks
     TopKWrapper topk_all;
     vector<unique_ptr<TopKWrapper>> topk;
     vector<BeamSearchResultManager> result_mgr;
@@ -447,6 +450,7 @@ class SearcherImplV1 {
 
     vector<shared_ptr<PrefixCache>> prefix_cache;
 
+    // 这里怎么又有一处threads ???
     std::vector<TaskThreadPool*> device_threads;
 
     vector<vector<SwapBuf>> swapped_buffers;
@@ -524,6 +528,7 @@ public:
             if (debug_level > 1)
                 std::cout << "LWP " << _get_tid() << " " << name << "\n";
             pthread_setname_np(pthread_self(), name.c_str());
+            // others model contexts
             peer_ctx[i] = new ModelContext(
                 ModelContext::create(*searcher->engine_, *searcher->par_models_[i], this->config, i, true));
         }, true, false);
@@ -751,11 +756,11 @@ public:
     }
 
     void init_slot(len_t b, SearchTask task) {
-        max_batch_active = std::max(b + 1, max_batch_active);
+        max_batch_active = std::max(b + 1, max_batch_active); // 这里传入的max_batch_active会不会有问题，会不会有多个空洞？？？
 
         tasks[b] = task;
         // std::cout << "task: b=" << b  << ", random=" << task->is_random() << ", seed=" << task->seed << "\n";
-        if (!topk[b])
+        if (!topk[b]) // 按理说这里应该一直是null才合理, 不然应该delete
             topk[b].reset(new TopKWrapper(ctx));
         topk[b]->set_seed(task->diverse || task->is_random(), task->seed);
         result_mgr[b].reset(std::max(task->beam_size, task->num_results));
@@ -868,7 +873,7 @@ void SearcherImplV1<TokenT, ResultT>::resize_rag_buf() {
         if (bm[b].unused_buffer_pos.size() < next_tokens[b].size()) {
             len_t ext_len = round_up_len(next_tokens[b].size());
             total_len_buf += ext_len;
-            if (total_len_buf > max_buf_token_num && !pre_alloc) {
+            if (total_len_buf > max_buf_token_num && !pre_alloc) { // 多机这块不是很好实现，TODO
                 len_t e = max_batch_active - 1;
                 if (b < e) {
                     // std::cout << "Swap out task " << e << "\n";
@@ -951,23 +956,24 @@ void SearcherImplV1<int, int>::fill_encode_input(vector<SearchTask>& new_tasks) 
         BM_ASSERT(new_tasks.empty(), "");
         // BM_ASSERT_EQ(chunking_b, max_batch_active, "");
         // Fake chunking task as new task
-        new_tasks.push_back(tasks[chunking_b]);
+        new_tasks.push_back(tasks[chunking_b]); // chunking时，只有一条处于chunking的prefill请求
     }
 
-    vector<int> v_batch(new_tasks.size());
-    vector<int> input_lens(new_tasks.size());
-    vector<int> full_input_lens(new_tasks.size()); // flash attention need real length
+    vector<int> v_batch(new_tasks.size()); // 每个请求在batch中的第几个位置, batch_indices
+    vector<int> input_lens(new_tasks.size()); // 每个请求这次处理的tokens数，不一定是全部，比如prefix_cache和chunked时, 这里乘beam_size吗？？？
+    vector<int> full_input_lens(new_tasks.size()); // flash attention need real length, 已处理的tokens+当前要处理的tokens
     vector<int> buf_lens(new_tasks.size());
     // fill matrices of input tokens
-    RagVector<int32_t> h_token;
-    RagVector<int32_t> h_batch; // batch in buffer
-    RagVector<int32_t> h_placement; // pos in buffer
-    RagVector<int32_t> h_position;
-    RagVector<int8_t> h_mask;
+    RagVector<int32_t> h_token;   // 要处理的tokens
+    RagVector<int32_t> h_batch;   // batch_indices, batch in buffer
+    RagVector<int32_t> h_placement; // beambuffermanager中的位置, pos in buffer
+    RagVector<int32_t> h_position;  // seq len pos
+    RagVector<int8_t> h_mask;       // beambuffermanager mask
 
     for (size_t i = 0; i < new_tasks.size(); ++i) {
         auto& task = new_tasks[i];
-        auto& tokens = task->input_tokens;
+        // 这里是截止当前的总长度
+        auto& tokens = task->input_tokens; // 每次迭代，这里是所有tokens，还是新的tokens？beam情况怎么算？还是只有prompt？？
         len_t b;
         if (chunking) {
             b = chunking_b;
@@ -975,6 +981,7 @@ void SearcherImplV1<int, int>::fill_encode_input(vector<SearchTask>& new_tasks) 
             b = assign_free_slot(task);
             BM_ASSERT(b != len_t(-1), "No free slot");
             set_debug_batch(i, b);
+            // B3: resize kv buffer
             init_slot(b, task);  // update max_batch_active
         }
         v_batch[i] = b;
@@ -991,7 +998,7 @@ void SearcherImplV1<int, int>::fill_encode_input(vector<SearchTask>& new_tasks) 
             // task->cached_len_ = cached_len;
             // std::cout << "cached_len: " << cached_len << endl;
         }
-        len_t token_num = tokens.size() - 1;  // Reserve last token for search
+        len_t token_num = tokens.size() - 1;  // Reserve last token for search, 如果是chunking中,这里始终获得的是所有的tokens
         BM_ASSERT_LT(cached_len, token_num, "");
         len_t encode_len = token_num - cached_len;
 
@@ -1012,10 +1019,10 @@ void SearcherImplV1<int, int>::fill_encode_input(vector<SearchTask>& new_tasks) 
             len_t beam_size1 = calc_max_beam_size(tasks, 0);
             BM_ASSERT(beam_size1 > 0, "");
             BM_ASSERT(max_batch_active > 0, "");
-            len_t chunk_size_adj = chunk_size - chunking_b * beam_size1;
+            len_t chunk_size_adj = chunk_size - chunking_b * beam_size1; // 减去chunking_b * beam_size1个decode的tokens???
             if (encode_len <= chunk_size_adj) {
                 // std::cout << "Done chunking b=" << b << ", len=" << (chunked + encode_len) << endl;
-                max_batch_active = chunking_b + 1;
+                max_batch_active = chunking_b + 1; // 怎么感觉这里没有啥必然联系???
                 chunking_b = -1; // end chunk_prefill
                 chunked = 0;
                 chunking = false;
@@ -1027,10 +1034,10 @@ void SearcherImplV1<int, int>::fill_encode_input(vector<SearchTask>& new_tasks) 
             }
         }
 
-        input_lens[i] = encode_len;
-        full_input_lens[i] = token_num;
+        input_lens[i] = encode_len;      // 本次要计算的长度
+        full_input_lens[i] = token_num;  // 输入总长度
         if (chunking)
-            full_input_lens[i] = chunked;
+            full_input_lens[i] = chunked; // 当前总长度
         len_t len1 = round_up_len(encode_len, 32);
         buf_lens[i] = (len1 <= len_buf / 2 || (len1 + 256) <= len_buf) ? len1 : len_buf;
         buf_lens[i] = config.rag_buffer ? bm[b].len_buf : buf_lens[i];
@@ -1059,7 +1066,7 @@ void SearcherImplV1<int, int>::fill_encode_input(vector<SearchTask>& new_tasks) 
         Tensor e_placement = rag_tensor(ctx, h_placement);
         Tensor e_mask = rag_tensor(ctx, h_mask);
         Tensor e_position = rag_tensor(ctx, h_position);
-        if (!new_tasks[0]->position_ids.empty()) {
+        if (!new_tasks[0]->position_ids.empty()) { // 这里干什么用？？？
             const len_t num_ids = new_tasks[0]->position_ids.size();
             BM_ASSERT_EQ(new_tasks.size(), 1, "multi-task is not supported");
             BM_ASSERT_EQ(num_ids % new_tasks[0]->input_length(), 0, "position_ids size mismatch");
@@ -1257,11 +1264,12 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
 
     while (true) {
         if (in_chunking()) {
-            max_batch_active = chunking_b + 1;
+            max_batch_active = chunking_b + 1; // chunked_prefix仅有一条且是batch最后一条
         }
         if (config.rag_buffer) {
             auto dev = ctx.with_device(0);
-            resize_rag_buf();
+            // B1: 这里需要每张卡都做
+            resize_rag_buf(); // 仅针对decode tokens分配kv cache，resize kv_cache buf 按需copy旧的kv_cache, 按需swap out/in
             active_count = max_batch_active;
         }
         searcher->active_size_ = active_count;
@@ -1269,7 +1277,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
             searcher->done_cond_.notify_all();
         }
         int max_total_token;
-        if (swap_count == 0 && active_count < max_batch && !in_chunking()) {
+        if (swap_count == 0 && active_count < max_batch && !in_chunking()) { // 取一条新的prefill
             int free_token_num = int(max_buf_token_num - total_len_buf - 2);
             if (dual_stream)
                 free_token_num -= config.max_total_token - 5000;
@@ -1288,6 +1296,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
             }
         }
         if (searcher->stopping_) {
+            // B2: 需要通知结束
             break;
         } else if (max_batch_active == 0) {
             BM_ASSERT(!new_tasks.empty(), "pop_multi() return 0 tasks.");
@@ -1306,7 +1315,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
                 << ", active_count=" << active_count << endl;
         }
         bool feed_input_embedding = !new_tasks.empty() && !new_tasks[0]->input_embeddings.empty();
-        if (feed_input_embedding && tasks[0]) {
+        if (feed_input_embedding && tasks[0]) { // 为什么要这么做？？？
             int b = assign_free_slot(tasks[0]);
             if (debug_level) std::cout << "Move task 0 to " << b << endl;
             move_task(b, 0); // move tasks[0] to b
@@ -1324,7 +1333,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
 
         /** -------------------------- Fill Next Search --------------------------- **/
         if (feed_input_embedding) max_batch_active = 1;
-        if (in_chunking()) max_batch_active = chunking_b;
+        if (in_chunking()) max_batch_active = chunking_b; // chunking之前的所有batch请求都是decode
         Matrix2D<int32_t> h_placement(max_batch_active, max_beam_size, -1); // pos in buffer
         Matrix2D<float> h_prob_prev(max_batch_active, max_beam_size, -50000);
         fill_search_tokens(h_placement, h_prob_prev);
@@ -1369,7 +1378,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
         /** ------------------------------ Fill result ------------------------------- **/
         active_count = 0;
         len_t max_batch_active1 = max_batch_active;
-        max_batch_active = 0;
+        max_batch_active = 0; // 重新计算这个值
         for (len_t b = 0; b < max_batch_active1; ++b) {
             if (tasks[b] && next_tokens[b].empty()) {
                 if (result_mgr[b].get_current_results() == 0) {
