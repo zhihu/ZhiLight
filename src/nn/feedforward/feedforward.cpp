@@ -534,6 +534,7 @@ public:
         }
 
         vector<Tensor> expert_inputs = slice_dim0(h_reorder, expert_token_num, total_seq_len == 1);
+        // Note: sparse MOE may consume too much memory
         vector<Tensor> expert_ret(num_experts_may_share); // GLOBAL
 
         {
@@ -638,7 +639,7 @@ public:
             all_ins.push_back(&experts[i]->w_in);
             all_outs.push_back(&experts[i]->w_out);
         }
-        int routed_scaling_to_weight = utils::get_int_env("ROUTED_SCALING_TO_WEIGHT", 1);
+        int routed_scaling_to_weight = utils::get_int_env("ROUTED_SCALING_TO_WEIGHT", 0);
         if (routed_scaling_to_weight > 0) {
             scale_gptq_scale(ctx, all_gateds);
             routed_scaling_factor = 1.;

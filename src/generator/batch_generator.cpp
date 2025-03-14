@@ -104,12 +104,22 @@ SearchTask TaskQueue::pop(bool wait) {
     Lock lock(mutex_);
     while (wait && !stopping_ && queue_.empty()) {
         can_pop_cond_.wait(lock);
+        if (!queue_.empty() && queue_.front()->canceled) {
+            queue_.pop(); // Drop canceled task
+            continue;
+        }
+    }
+    if (stopping_) {
+        std::cerr << "TaskQueue stopped.\n";
+    } else if (wait) {
+        BM_ASSERT(!queue_.empty(), "queue_ is empty");
     }
     if (queue_.empty())
         return SearchTask();
     auto task = queue_.front();
     queue_.pop();
     can_push_cond_.notify_one();
+    BM_ASSERT(task, "Empty task");
     return task;
 }
 
@@ -504,8 +514,7 @@ public:
         enabled_chunk_prefill = utils::get_int_env("CHUNKED_PREFILL", 0) > 0;
         chunk_size = utils::get_int_env("CHUNKED_PREFILL_SIZE", 512);
         pre_alloc = utils::get_int_env("PRE_ALLOC_ALL_TOKEN", 1) > 0
-            && config.flash_attention
-            && dual_stream > 0;
+            && config.flash_attention;
         if (pre_alloc)
             std::cout << ">>> Use pre_alloc: " << pre_alloc << endl;
         std::cout << ">>> CHUNKED_PREFILL:" << enabled_chunk_prefill << ", SIZE: " << chunk_size << endl;
@@ -564,13 +573,15 @@ public:
         if (ctx.latent_cache() && ctx.cfg.kv_lora_rank > 0) {
             kv_buf_bytes = model.num_layers * (ctx.cfg.kv_lora_rank + ctx.cfg.qk_rope_head_dim) * sizeof(half);
         }
+        if (utils::get_int_env("reserved_work_mem_mb") > 0)
+            config.reserved_work_mem_mb = utils::get_int_env("reserved_work_mem_mb");
         size_t reserve_mem = size_t(config.reserved_work_mem_mb) * 1024U * 1024U;
         if (need_dequant_weight) {
             size_t dequant_ws = get_weight_bytes(model, ctx.world_size());
             reserve_mem += dequant_ws;
             std::cout << ">>> ADD dequant workspace=" << (dequant_ws / 1024 / 1024) << "MB\n";
         }
-        if (dual_stream) {
+        if (pre_alloc) {
             int max_total_token = enabled_chunk_prefill ? std::max(chunk_size, 4096U) : config.max_total_token;
             size_t ws = size_t(model.dim_model * max_total_token * 2 * sizeof(half));
             reserve_mem += ws;
@@ -615,7 +626,7 @@ public:
             };
             peer_run(fn, true);  // create prefix cache
         }
-        if (dual_stream) {
+        if (pre_alloc) {
             BM_ASSERT(!config.enable_prompt_caching, "");
             auto fn = [&](int i) {
                 peer_ctx[i]->reserve_cache_alloc(free_mem - reserve_mem);
@@ -711,10 +722,10 @@ public:
             return;
         }
         auto fn = [=](int i) {
-            if (dual_stream)
+            if (pre_alloc)
                 peer_ctx[i]->use_cache_alloc(true);
             peer_ctx[i]->resize_task_buf(b, new_len_buf);
-            if (dual_stream)
+            if (pre_alloc)
                 peer_ctx[i]->use_cache_alloc(false);
         };
         peer_run(fn, false);  // resize_task_buf
@@ -740,12 +751,12 @@ public:
     void load_task_buf(len_t e) {
         int num_layers = searcher->model_->num_layers;
         auto fn = [=](int i) {
-            if (dual_stream)
+            if (pre_alloc)
                 peer_ctx[i]->use_cache_alloc(true);
             peer_ctx[i]->resize_task_buf(e, bm[e].len_buf); // allocate GPU memory
             peer_ctx[i]->rag_buffer()->load_task_buf(
                 e, num_layers, swapped_buffers[e][i].ptr, swapped_buffers[e][i].len);
-            if (dual_stream)
+            if (pre_alloc)
                 peer_ctx[i]->use_cache_alloc(false);
         };
         peer_run(fn, true);  // load_task_buf
@@ -1147,6 +1158,9 @@ void SearcherImplV1<int, int>::fill_search_tokens(
             h_placement(b, i) = bm[b].place_token(hypo_i);  // place in buffer
             h_position(b, i) = position - 1;  // position in sentence
             h_prob_prev(b, i) = is_random ? 0 : hypo_i.log_prob;
+            if (tasks[b] && tasks[b]->beam_size == 1) {
+                BM_ASSERT_EQ(h_position(b, i), h_placement(b, i), "Wrong position");
+            }
         }
         if (!config.rag_buffer) {
             bm[b].mask_hypotheses(&h_placement(b, 0), hyp_num, &h_mask(b, 0, 0));
@@ -1179,6 +1193,8 @@ void SearcherImplV1<int, int>::fill_search_tokens(
         Tensor d_mask = config.rag_buffer ? rag_tensor(ctx, rag_mask) : h_mask.to_tensor(ctx);
 
         ctx.dyn_batch()->set_search(d_token, Tensor(), d_placement, d_position, d_mask);
+        ctx.dyn_batch()->sv_position = std::vector<int>(
+            h_position.mutable_data(), h_position.mutable_data() + h_position.size());
         ctx.dyn_batch()->sv_len_buf = rag_buf_lens;
         ctx.dyn_batch()->s_len_buf = ctx.tensor_of(rag_buf_lens);
         // TODO: max_hyp_num > 1
@@ -1247,6 +1263,8 @@ Tensor SearcherImplV1<int, int>::join_forward(Tensor* hidden) {
 
         ctx1.clear_identity_cache();
         BM_CUDART_ASSERT(cudaStreamSynchronize(ctx1.current_stream()->ptr));
+        // reset dyn batch context after Synchronize
+        ctx1.set_dyn_batch(std::make_shared<model::DynBatchContext>());
     };
     peer_run(peer_fn, true); // join_forward
 
@@ -1276,7 +1294,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
             if (dual_stream)
                 free_token_num -= config.max_total_token - 5000;
             max_total_token = std::min(config.max_total_token, free_token_num);
-            if (pre_alloc && dual_stream) {
+            if (pre_alloc) {
                 auto dev = ctx.with_device(0);
                 ctx.use_cache_alloc(true);
                 max_total_token = ctx.get_allocator()->get_free_memory() / kv_buf_bytes;
@@ -1319,8 +1337,6 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
         if (!new_tasks.empty() || in_chunking()) {
             fill_encode_input(new_tasks); // update max_batch_active in init_slot()
             new_tasks.clear();
-        } else {
-            peer_run([&](int i) { peer_ctx[i]->dyn_batch()->clear_encode(); });
         }
         max_beam_size = calc_max_beam_size(tasks, 1);
 
@@ -1334,6 +1350,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
         /** -------------------------- Get Search Logits --------------------------- **/
         Tensor hidden;
         Tensor logits_all = join_forward(&hidden);
+        ctx.check_numeric(logits_all);
         if (config.enable_prompt_caching) {
             save_prompt_cache();
         }
@@ -1388,7 +1405,10 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
                     BM_ASSERT_LE(b, chunking_b - 1, "");
                     chunking_b--;
                 }
-                // std::cout << "Finish task " << b << "\n";
+                if (debug_level >= 2) {
+                     std::cout << "Finish task: " << b << "\n";
+                     std::cout << "Current steps: " << steps << "\n";
+                }
             }
             if (tasks[b] && tasks[b]->canceled) {
                 tasks[b].reset();

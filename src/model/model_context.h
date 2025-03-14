@@ -213,6 +213,8 @@ public:
 
     int num_layers() const { return layer_devices.size(); }
 
+    void check_numeric(const core::Tensor& tensor) const;
+
 private:
     void reduce_tp_int8(const Tensor& data, DataType out_type, Tensor* output) const;
     KVCacheConfig get_kv_cache_config();

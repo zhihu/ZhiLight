@@ -39,6 +39,10 @@ template<typename T, typename Tb>
 inline T round_up(T m, Tb d) {
     return ((m + T(d) - 1) / T(d)) * T(d);
 }
+template<typename T, typename Tb>
+inline T ceil_div(T m, Tb d) {
+    return (m + T(d) - 1) / T(d);
+}
 
 #define MAX_NUM_THREADS 1024
 
