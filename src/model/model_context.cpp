@@ -339,6 +339,12 @@ void ModelContext::update_act_scale(const std::string& name, const Tensor& act) 
     act_scale_map_[name] = x;
 }
 
+void ModelContext::check_numeric(const core::Tensor& tensor) const {
+    if (checking_numerics()) {
+        functions::check_numeric(*this, tensor);
+    }
+}
+
 #pragma GCC pop_options
 
 }

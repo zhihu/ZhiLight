@@ -71,6 +71,7 @@ struct DynBatchContext {
     Tensor s_sub;
     Tensor s_placement;
     Tensor s_position;
+    vector<int> sv_position;
     Tensor s_mask;
     vector<Tensor> s_position_buckets; // for CPMBee ragged buffer
     vector<Tensor> s_position_biases;  // for CPMBee ragged buffer
@@ -106,6 +107,13 @@ struct DynBatchContext {
     shared_ptr<Tensor> unquant_key_buf;
     shared_ptr<Tensor> unquant_val_buf;
     int input_len_no_split;
+
+    // for FlashMLA
+    Tensor seqlens_k;
+    Tensor paged_kv; // faked
+    Tensor block_table;
+    Tensor tile_scheduler_metadata;
+    Tensor num_splits;
 
     Tensor get_position_bias_addresses(ModelContext &ctx) {
         std::vector<void *> pb_addrs;

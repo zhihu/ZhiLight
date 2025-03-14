@@ -5,19 +5,14 @@ namespace bmengine {
 namespace functions {
 
 // gridDim(n / 1024, 1, 1), blockDim(1024, 1, 1)
-/*
 template<typename T>
-__global__ void BM_KERNEL(fill)(
-    size_t n,
-    T *x,
-    T value
-) {
+__global__ void KERNEL_fill(size_t n, T *x, T value) {
     size_t i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
         x[i] = value;
     }
 }
-*/
+
 template<typename T>
 __global__ void BM_KERNEL(fill_ones)(size_t n, T* x) {
     size_t i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -80,6 +75,18 @@ void normal_(const core::Context& ctx, curandGenerator_t& gen, const core::Tenso
     BM_CUDART_ASSERT(cudaGetLastError());
 }
 
+void fill(const core::Context& ctx, const core::Tensor& x, float value) {
+    const size_t n = x.numel();
+    size_t threads = 1024;
+    size_t blocks = round_up(n, threads) / threads;
+    auto stream = ctx.current_stream()->ptr;
+
+    BM_DTYPE_DISPATCH_FLOAT(x.dtype(), {
+        KERNEL_fill<<<blocks, threads, 0, stream>>>(
+        n, x.data<scalar_t>(), scalar_t(value));
+    });
+    BM_CUDART_ASSERT(cudaGetLastError());
+}
 }
 
 }

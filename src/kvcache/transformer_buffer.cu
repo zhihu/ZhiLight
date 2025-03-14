@@ -1,11 +1,14 @@
-#include <memory>
+#include "kvcache/transformer_buffer.h"
+
 #include <iostream>
+#include <limits>
+#include <memory>
 #include <assert.h>
 
 #include "bmengine/functions/init.h"
-#include "kvcache/transformer_buffer.h"
 #include "nn/quant/int8/quant_kernel.h"
-#include "block_allocator.h"
+#include "utils/env.h"
+#include "private/allocator.h"
 
 namespace kvcache {
 
@@ -193,7 +196,7 @@ core::Tensor resize_buffer(
         (normalized_dim >= 0) && (normalized_dim < shape.size()),
         "Invalid dimension: dim must in [0, " + std::to_string(shape.size()) + "), but got "
             + std::to_string(dim));
-    BM_ASSERT(ctx.active_device() == buffer.device(), "Invalid deivce");
+    BM_ASSERT_EQ(ctx.active_device(), buffer.device(), "Invalid device");
 
     size_t stride_base = 1;
     for (int i = normalized_dim + 1; i < shape.size(); i++) {
@@ -319,14 +322,31 @@ void TransformerBuffer::resize_multi_layer(
         alloc_layers = end - begin;
     bool first = buffer[begin].numel() == 0;
     for (size_t i = begin; i < end; i += alloc_layers) {
+        size_t align_bytes = 1024;
+        // Allow kv cache be used in paged attention kernels.
+        static int align_page = utils::get_int_env("KV_CACHE_ALIGN_PAGE", 0);
+        if (num_heads == 1 && align_page > 0) {
+            // for MLA to use paged table
+            align_bytes = align_page * dim_head * core::get_elem_size(dtype);
+            BM_ASSERT_EQ(new_length % align_page, 0, "new_length can't mod page size.");
+        }
         alloc_layers = std::min(end - i, alloc_layers);
         // std::cout << "resize_multi_layer,  i=" << i << ", alloc_layers=" << alloc_layers << "\n";
         core::Tensor tensor =
-            dim == -2 ? ctx.tensor({ alloc_layers, num_heads, new_length, dim_head }, dtype)
-                      : ctx.tensor({ alloc_layers, new_length, num_heads, dim_head }, dtype);
+            dim == -2 ? ctx.tensor({ alloc_layers, num_heads, new_length, dim_head }, dtype, "1", align_bytes)
+                      : ctx.tensor({ alloc_layers, new_length, num_heads, dim_head }, dtype, "1", align_bytes);
+        if (num_heads == 1 && align_page > 0) {
+            char* base_ptr = ctx.get_allocator()->get_base_ptr();
+            size_t offset = tensor.data<char>() - base_ptr;
+            BM_ASSERT_EQ(offset % align_bytes, 0, "data_ptr is not aligned as expected.");
+        }
         auto chunk = tensor.chunk();
         std::vector<core::Tensor> old_chunk(alloc_layers);
-        functions::zeros_(ctx, tensor);
+        if (false && num_heads == 1) {  // MLA
+            functions::fill(ctx, tensor, -std::numeric_limits<float>::infinity());
+        } else {
+            functions::zeros_(ctx, tensor);
+        }
         for (int j = 0; j < alloc_layers; j++) {
             old_chunk[j] = buffer[i + j];
             buffer[i + j] = chunk[j]; // .view({1, num_heads, new_length, dim_head});
