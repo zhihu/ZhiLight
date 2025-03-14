@@ -15,6 +15,8 @@
 #include <boost/archive/text_oarchive.hpp>
 #include <boost/archive/text_iarchive.hpp>
 #include <boost/serialization/vector.hpp>
+#include <boost/serialization/map.hpp>
+#include <boost/serialization/shared_ptr.hpp>
 
 namespace batch_generator {
 
@@ -70,7 +72,7 @@ struct SearchTask_ {
         ar & top_logprobs;
         ar & stream;
         ar & position_ids;
-        ar & input_embeddings;
+        //ar & input_embeddings; // no implement!
         ar & position_delta;
         ar & logit_bias;
     }
