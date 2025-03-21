@@ -2,6 +2,7 @@
 #include "bmengine/core/context.h"
 #include "bmengine/core/exception.h"
 #include "bmengine/logger/std_log_op.hpp"
+#include "bmengine/c10d/host_communicator.h"
 #include <cstdlib>
 #include <iostream>
 #include <mutex>
@@ -104,7 +105,7 @@ EngineImpl::EngineImpl(const std::vector<DeviceConfiguration>& dev_cfgs, const D
     }
 
     uniqueIDs.resize(pp_ranks);
-    char *data = static_cast<char *>(uniqueIDs.data());
+    char *data = reinterpret_cast<char *>(uniqueIDs.data());
     int nbytes = sizeof(ncclUniqueId) * pp_ranks;
     // broadcast
     if (dist_cfg.node_rank == 0) {
