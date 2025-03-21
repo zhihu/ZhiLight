@@ -10,11 +10,12 @@
 #include "private/allocator.h"
 #include "private/stream.h"
 
+
+namespace bmengine {
+
 namespace c10d {
 class HostCommunicator;
 }
-namespace bmengine {
-
 namespace core {
 
 class DeviceHandles {
@@ -69,7 +70,7 @@ class EngineImpl {
     bool is_mem_frozen { false };
 
 public:
-    EngineImpl(const std::vector<DeviceConfiguration>& cfg, int tp);
+    EngineImpl(const std::vector<DeviceConfiguration>& cfg, const DistConfiguration& dist_cfg);
     ~EngineImpl();
     EngineImpl(const EngineImpl&) = delete;
     EngineImpl& operator=(const EngineImpl&) = delete;
