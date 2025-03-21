@@ -91,4 +91,8 @@ void define_engine(py::module_& m) {
         .def(py::init(&create_engine));
 }
 
+void define_cpm_base(py::module_& m) {
+    py::class_<PyModelBase>(m, "CPMBase");
+}
+
 } // namespace bind
