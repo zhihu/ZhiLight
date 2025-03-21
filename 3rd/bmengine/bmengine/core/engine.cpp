@@ -26,8 +26,8 @@ static inline int get_int_env(const char* name, int def_val = 0) {
     return env_str != nullptr ? std::atoi(env_str) : def_val;
 }
 
-DeviceHandles::DeviceHandles(int dev_id, ncclUniqueId uniqueID, int rank, int world_size)
-    : dev_id(dev_id), rank(rank) {
+DeviceHandles::DeviceHandles(int dev_id, ncclUniqueId uniqueID, int tp_rank, int tp_ranks, int pp_rank)
+    : dev_id(dev_id), tp_rank(tp_rank), tp_ranks(tp_ranks), pp_rank(pp_rank), pp_ranks(pp_ranks) {
     DeviceGuard guard(dev_id);
     BM_CUDART_ASSERT(cudaStreamCreate(&stream));
     BM_CUBLAS_ASSERT(cublasCreate(&cublas_handle));
@@ -35,7 +35,10 @@ DeviceHandles::DeviceHandles(int dev_id, ncclUniqueId uniqueID, int rank, int wo
 //    ncclConfig_t nccl_config = NCCL_CONFIG_INITIALIZER;
 //    nccl_config.blocking = 0;
 //    BM_NCCL_ASSERT(ncclCommInitRankConfig(&comm, world_size, uniqueID, rank, &nccl_config));
-     BM_NCCL_ASSERT(ncclCommInitRank(&comm, world_size, uniqueID, rank));
+    if (tp_ranks > 1) {
+        BM_NCCL_ASSERT(ncclCommInitRank(&comm, tp_ranks, uniqueID, tp_rank));
+        std::cout << "NCCL tp_rank=" << tp_rank << ", pp_rank=" << pp_rank << " connected done!" << std::endl;
+    }
     cudaDeviceProp dev_prop{};
     BM_CUDART_ASSERT(cudaGetDeviceProperties(&dev_prop, dev_id));
     int cc_major = dev_prop.major;
@@ -62,17 +65,32 @@ DeviceHandles::~DeviceHandles() {
     try {
         BM_CUBLAS_ASSERT(cublasDestroy(cublas_handle));
         BM_CUDART_ASSERT(cudaStreamDestroy(stream));
-        BM_NCCL_ASSERT(ncclCommDestroy(comm));
+        if (tp_ranks > 1) {
+            BM_NCCL_ASSERT(ncclCommDestroy(comm));
+        }
     } catch (const BMEngineException& e) { std::cerr << e.what() << std::endl; }
 }
 
-EngineImpl::EngineImpl(const std::vector<DeviceConfiguration>& cfg, int tp)
+EngineImpl::EngineImpl(const std::vector<DeviceConfiguration>& dev_cfgs, const DistConfiguration& dist_cfg)
     : debug(0) {
-    if (tp <= 0) tp = int(cfg.size());
-    world_size_ = tp;
-    int nccl_version;
-    ncclGetVersion(&nccl_version);
-    std::cout << "********* world_size=" << world_size_ << ", nccl_version=" << nccl_version << " *********\n";
+    int tp_ranks = dist_cfg.tp;
+    int local_dev_count = static_cast<int>(dev_cfgs.size());
+    int total_dev_count = local_dev_count * dist_cfg.nnodes;
+    if (tp_ranks <= 0) tp_ranks = total_dev_count;
+    BM_ASSERT_EQ(total_dev_count % tp_ranks, 0, "dev_count can't mod tp");
+    BM_ASSERT(
+        std::thread::hardware_concurrency() > dev_cfgs.size(),
+        "at least one cpu-core per device required.");
+    int pp_ranks = total_dev_count / tp_ranks;
+    world_size_ = tp_ranks;
+    if (tp_ranks > 1 || pp_ranks > 1) {
+        int nccl_version;
+        ncclGetVersion(&nccl_version);
+        std::cout << "********* world_size=" << world_size_ << ", nccl_version=" << nccl_version << " *********\n";
+    }
+    
+    hc = new c10d::HostCommunicator(dist_cfg.dist_init_addr, dist_cfg.nnodes, dist_cfg.node_rank);
+
     char* debug_env = std::getenv("BM_DEBUG_LEVEL");
     if (debug_env != nullptr) {
         debug = std::atoi(debug_env);
@@ -81,41 +99,50 @@ EngineImpl::EngineImpl(const std::vector<DeviceConfiguration>& cfg, int tp)
     bool direct_mem_alloc =
         direct_mem_alloc_str != nullptr && strncmp(direct_mem_alloc_str, "1", 1) == 0;
 
-    int dev_count = static_cast<int>(cfg.size());
-    BM_ASSERT_EQ(dev_count % tp, 0, "dev_count can't mod tp");
-    BM_ASSERT(
-        std::thread::hardware_concurrency() > dev_count,
-        "at least one cpu-core per device required.");
-
-    for (int i = 0; i < world_size_; i++) {
+    for (int i = 0; i < local_dev_count; i++) {
         device_threads.push_back(new TaskThreadPool(1, i));
     }
 
-    uniqueIDs.resize(dev_count / tp);
-    for (size_t i = 0; i < uniqueIDs.size(); i++) {
-        BM_NCCL_ASSERT(ncclGetUniqueId(&uniqueIDs[i]));
+    uniqueIDs.resize(pp_ranks);
+    char *data = static_cast<char *>(uniqueIDs.data());
+    int nbytes = sizeof(ncclUniqueId) * pp_ranks;
+    // broadcast
+    if (dist_cfg.node_rank == 0) {
+        for (size_t i = 0; i < uniqueIDs.size(); i++) {
+            BM_NCCL_ASSERT(ncclGetUniqueId(&uniqueIDs[i]));
+        }
     }
+    hc->broadcast(&data, &nbytes);
+
     ncclGroupStart();
-    for (int i = 0; i < dev_count; i++) {
-        handles.push_back(new DeviceHandles(cfg[i].device_id, uniqueIDs[i / tp], i % tp, tp));
+    local_ranks_ = 0;
+    int rank_base = dist_cfg.node_rank * local_dev_count;
+    for (int i = 0; i < local_dev_count; i++) {
+        int tp_rank = (i + rank_base) % tp_ranks;
+        int pp_rank = (i + rank_base) / tp_ranks;
+        if (pp_rank == 0) {
+            local_ranks_++;
+        }
+        handles.push_back(new DeviceHandles(dev_cfgs[i].device_id, uniqueIDs[pp_rank], tp_rank, tp_ranks, pp_rank, pp_ranks));
         MemoryAllocator* allocator = direct_mem_alloc ?
-            new DirectMemoryAllocator(cfg[i].device_id, i, cfg[i].memory_limit, handles[i]->stream) :
-            new MemoryAllocator(cfg[i].device_id, i, cfg[i].memory_limit, handles[i]->stream);
+            new DirectMemoryAllocator(dev_cfgs[i].device_id, i, dev_cfgs[i].memory_limit, handles[i]->stream) :
+            new MemoryAllocator(dev_cfgs[i].device_id, i, dev_cfgs[i].memory_limit, handles[i]->stream);
         allocators.push_back(allocator);
-        streams.push_back(new StreamAllocator(cfg[i].device_id));
+        streams.push_back(new StreamAllocator(dev_cfgs[i].device_id));
         device_lock.push_back(new std::mutex());
     }
     ncclGroupEnd();
-    if (dev_count > 1) {
+
+    if (local_dev_count > 1) {
         int canAccessPeer;
-        for (int from = 0; from < dev_count; from++) {
-            for (int to = 0; to < dev_count; to++) {
-                BM_CUDART_ASSERT(cudaSetDevice(cfg[from].device_id));
+        for (int from = 0; from < local_dev_count; from++) {
+            for (int to = 0; to < local_dev_count; to++) {
+                BM_CUDART_ASSERT(cudaSetDevice(dev_cfgs[from].device_id));
                 if (from != to) {
                     BM_CUDART_ASSERT(cudaDeviceCanAccessPeer(
-                        &canAccessPeer, cfg[from].device_id, cfg[to].device_id));
+                        &canAccessPeer, dev_cfgs[from].device_id, dev_cfgs[to].device_id));
                     if (canAccessPeer == 1) {
-                        auto result = cudaDeviceEnablePeerAccess(cfg[to].device_id, 0);
+                        auto result = cudaDeviceEnablePeerAccess(dev_cfgs[to].device_id, 0);
                         // with nccl peer access already enabled;
                         if (result == cudaErrorPeerAccessAlreadyEnabled) {
                             cudaGetLastError();
@@ -140,6 +167,7 @@ EngineImpl::~EngineImpl() {
     for (auto th : device_threads) {
         delete th;
     }
+    delete hc;
 }
 
 DeviceHandles* EngineImpl::get_device_handle(int dev_id) {
@@ -204,11 +232,12 @@ void EngineImpl::print_memory_summary() {
 }
 
 void EngineImpl::device_foreach(std::function<void(int)>& fn) {
-    for (int i = 0; i < world_size_; ++i) {
+    int local_worker_num = static_cast<int>(device_threads.size());
+    for (int i = 0; i < local_worker_num; ++i) {
         device_threads[i]->run(std::bind(fn, i));
     }
     std::exception_ptr e_ptr;
-    for (int i = 0; i < world_size_; ++i) {
+    for (int i = 0; i < local_worker_num; ++i) {
         try {
             device_threads[i]->wait();
         } catch (...) {
@@ -252,7 +281,7 @@ Engine::~Engine() { }
 
 Context Engine::create_context(const std::vector<int>& devices) const {
     BM_ASSERT(devices.size() <= (size_t) num_gpus(), "devices.size() too big");
-    int rank = pimpl->handles[devices[0]]->rank;
+    int rank = pimpl->handles[devices[0]]->tp_rank;
     return Context(std::make_unique<ContextImpl>(this->pimpl.get(), devices, rank));
 }
 Context Engine::create_context() const {
@@ -262,17 +291,24 @@ Context Engine::create_context() const {
 }
 Context Engine::create_context_rank(int rank) const {
     std::vector<int> devices;
+    int tp_rank = 0;
     for (size_t i = 0; i < pimpl->handles.size(); ++i) {
-        if (pimpl->handles[i]->rank == rank)
+        if (pimpl->handles[i]->tp_rank % local_ranks() == rank) {
             devices.push_back(int(i));
+            tp_rank = pimpl->handles[i]->tp_rank;
+        }
     }
     // std::cout << "Rank: " << rank << ", devices: " << devices << "\n";
-    BM_ASSERT(!devices.empty(), "Wrong rank " + std::to_string(rank));
-    return Context(std::make_unique<ContextImpl>(this->pimpl.get(), devices, rank));
+    BM_ASSERT(!devices.empty(), "Wrong rank " + std::to_string(tp_rank));
+    return Context(std::make_unique<ContextImpl>(this->pimpl.get(), devices, tp_rank));
 }
 
 int Engine::world_size() const {
     return this->pimpl->world_size_;
+}
+
+int Engine::local_ranks() const {
+    return this->pimpl->local_ranks_;
 }
 
 int Engine::num_gpus() const {

@@ -30,6 +30,9 @@ class LLMEngine:
                 model_config=engine_config.model_config,
                 quant_config=engine_config.quant_config,
                 parallel=engine_config.enable_tensor_parallel,
+                dist_init_addr=engine_config.dist_init_addr,
+                nnodes=engine_config.nnodes,
+                node_rank=engine_config.node_rank
             )
             if engine_config.is_cpm_directory_struct:
                 assert not engine_config.use_safetensors, "not support safetensors for old cpm load method."

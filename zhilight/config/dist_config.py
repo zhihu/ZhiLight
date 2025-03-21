@@ -1,11 +1,14 @@
 import enum
 from typing_extensions import TypedDict
+from zhilight import C
 
 
 class DistConfig(object):
-    def __init__(self, parallel, tp=0):
-        self.parallel: bool = parallel
-        self.tp: int = tp
+    def __init__(self, tp: int = -1, dist_init_addr: str = None, nnodes: int = 1, node_rank: int = 0):
+        self.tp = tp
+        self.dist_init_addr = dist_init_addr
+        self.nnodes = nnodes
+        self.node_rank = node_rank
 
     @staticmethod
     def adapt(config):
@@ -16,3 +19,11 @@ class DistConfig(object):
         elif isinstance(config, int):
             return DistConfig(parallel=config > 1, tp=config)
         raise ValueError("Invalid config: " + str(config))
+
+    def to_c_config(self):
+        return C.DistConfig(
+            self.tp,
+            self.dist_init_addr,
+            self.nnodes,
+            self.node_rank,
+        )

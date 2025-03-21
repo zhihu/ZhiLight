@@ -31,13 +31,15 @@ public:
         EnginePtr engine,
         model::ModelConfig model_config,
         model::QuantConfig quant_config,
-        bool parallel)
+        bmengine::core::DistConfiguration dist_config)
         : PyModelBase("llama", parallel), engine_(engine), model_config_(model_config) {
         std::cout << model_config.to_string() << std::endl;
-        if (!parallel && engine->num_gpus() > 1) {
-            throw std::runtime_error("WARNING: Use parallel=false with multiple GPU !!!");
+
+        bool parallel = false;
+        if (dist_config.tp > 1 || (dist_config.tp < 0 && (engine->num_gpus() > 1 || dist_config.nnodes > 1))) {
+            parallel = true;
         }
-        models_.resize(engine->world_size());
+        models_.resize(engine->local_ranks());
         engine->device_foreach([this, &model_config, quant_config, parallel](int i) {
             auto ctx = engine_->create_context_rank(i);
             auto with_device = ctx.with_device(0);

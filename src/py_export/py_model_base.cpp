@@ -13,6 +13,7 @@ namespace bind {
 
 namespace py = pybind11;
 using bmengine::core::DeviceConfiguration;
+using bmengine::core::DistConfiguration;
 using bmengine::core::Engine;
 using model::ModelConfig;
 using model::QuantConfig;
@@ -41,6 +42,20 @@ void define_quant_config(py::module_& m) {
         .def(py::init(&create_quant_config));
 }
 
+DistConfiguration create_dist_config(int tp, std::string dist_init_addr, int nnodes, int node_rank) {
+    DistConfiguration config{};
+    config.tp = parallel;
+    config.dist_init_addr = dist_init_addr;
+    config.nnodes = nnodes;
+    config.node_rank = node_rank;
+    return config;
+}
+
+void define_dist_config(py::module_& m) {
+    py::class_<DistConfiguration>(m, "DistConfig")
+        .def(py::init(&create_dist_config));
+}
+
 static std::vector<DeviceConfiguration> get_all_dev_config(size_t memory_limit) {
     std::vector<DeviceConfiguration> devices;
     int gpu_num;
@@ -51,7 +66,7 @@ static std::vector<DeviceConfiguration> get_all_dev_config(size_t memory_limit) 
     return devices;
 }
 
-std::shared_ptr<Engine> create_engine(int device_id, size_t memory_limit, int tp) {
+std::shared_ptr<Engine> create_engine(int device_id, size_t memory_limit, DistConfiguration dist_cfg) {
     if (memory_limit == 0) {
         size_t free, total;
         BM_CUDART_ASSERT(cudaSetDevice(device_id < 0 ? 0 : device_id));
@@ -68,20 +83,12 @@ std::shared_ptr<Engine> create_engine(int device_id, size_t memory_limit, int tp
     } else {
         devices.emplace_back(device_id, size_t(memory_limit));
     }
-    return std::make_shared<Engine>(devices, tp);
+    return std::make_shared<Engine>(devices, dist_cfg);
 }
 
 void define_engine(py::module_& m) {
     py::class_<Engine, std::shared_ptr<Engine>>(m, "Engine")
         .def(py::init(&create_engine));
-}
-
-void initialize_gemm(ModelConfig model_config, QuantConfig quant_config, int tp, int max_length) {
-}
-
-void define_cpm_base(py::module_& m) {
-    py::class_<PyModelBase>(m, "CPMBase");
-    m.def("initialize_gemm", &initialize_gemm);
 }
 
 } // namespace bind

@@ -14,6 +14,7 @@ namespace py = pybind11;
 
 void define_model_config(py::module_& m);
 void define_quant_config(py::module_& m);
+void define_dist_config(py::module_& m);
 
 typedef std::shared_ptr<bmengine::core::Engine> PyEngine;
 void define_engine(py::module_& m);

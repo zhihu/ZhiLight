@@ -117,7 +117,7 @@ class LLaMA:
         model_path: str,
         model_config: Optional[LLaMAModelConfig] = None,
         quant_config: Optional[QuantConfig] = None,
-        parallel: Union[DistConfig, int, bool] = 0,
+        dist_config: Optional[DistConfig] = None,
         tokenizer=None,
         device_id: int = -1,  # deprecated
         memory_limit: int = 0,  # deprecated
@@ -125,24 +125,24 @@ class LLaMA:
     ):
         self._config = _get_config(ModelAdapter.adapt(model_config))
         self._quant_config = QuantConfig.adapt_hf_config(quant_config, self._config)
-        dist_config = DistConfig.adapt(parallel)
-        print(f"dist_config: parallel={dist_config.parallel}")
 
         self._init_tokenizer(model_path, tokenizer)
 
         c_config = C.ModelConfig(self._config)
         c_quant_config = quant_config_to_c(self._quant_config)
-        C.initialize_gemm(c_config, c_quant_config, dist_config.tp, self._config["max_token"])
+        if dist_config is None:
+            dist_config = DistConfig()
+        c_dist_config = dist_config.to_c_config()
 
         self._context = None  # Reserve for future usage
 
-        c_engine = C.Engine(device_id, memory_limit, dist_config.tp)
+        c_engine = C.Engine(device_id, memory_limit, c_dist_config)
 
         self._model = C.LLaMA(
             c_engine,
             c_config,
             c_quant_config,
-            dist_config.parallel,
+            c_dist_config,
         )
 
     def process_inputs(self, messages: List[dict]):

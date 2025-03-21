@@ -431,7 +431,7 @@ class SearcherImplV1 {
 
     vector<int> steps;
     vector<vector<BeamHypothesis>> hypotheses;
-    vector<vector<BeamBufferInfo>> next_tokens;
+    vector<vector<BeamBufferInfo>> next_tokens; // 多机共享
     vector<SearchTask> new_tasks;
     len_t beam_size;
     len_t max_batch_active { 0 };
@@ -867,7 +867,7 @@ public:
 
 template <typename TokenT, typename ResultT>
 void SearcherImplV1<TokenT, ResultT>::resize_rag_buf() {
-    total_len_buf = sum_len_buf();
+    total_len_buf = sum_len_buf(); // TODO: 调整了beamBuffer之后调整kvcache
     // std::cout << "max_batch_active=" << max_batch_active << ", total_len_buf=" << total_len_buf << ", max_buf_token_num=" << max_buf_token_num << "\n";
     // resize buf if necessary to hold next step tokens
     for (len_t b = 0; b < max_batch_active; ++b) {
@@ -1270,11 +1270,13 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
         if (config.rag_buffer) {
             auto dev = ctx.with_device(0);
             // B1: 这里需要每张卡都做
+            // swap_out/swap_in kv_cache & resize token buffer & kv_buffer
+            // TODO: 这里可能更改max_batch_active和swap_count
             resize_rag_buf(); // 仅针对decode tokens分配kv cache，resize kv_cache buf 按需copy旧的kv_cache, 按需swap out/in
-            active_count = max_batch_active;
+            active_count = max_batch_active; // 内部可能改，所以这里重置一下
         }
         searcher->active_size_ = active_count;
-        if (active_count == 0 && searcher->queue_.size() == 0) {
+        if (active_count == 0 && searcher->queue_.size() == 0) { // 这里slave需要跳过
             searcher->done_cond_.notify_all();
         }
         int max_total_token;
@@ -1296,7 +1298,9 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
                 task->begin_ts = logger::get_time_us();
             }
         }
-        if (searcher->stopping_) {
+        // TODO: broadcast new_tasks
+
+        if (searcher->stopping_) { // stop & cancel 都需要通知slave, 这里可以先不管
             // B2: 需要通知结束
             break;
         } else if (max_batch_active == 0) {
@@ -1307,7 +1311,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
 
         // resize fields
         if (!config.rag_buffer) {
-            len_t new_len_buf = calc_new_len_buf(max_beam_size);
+            len_t new_len_buf = calc_new_len_buf(max_beam_size); // max_beam_size可能也需要broadcast
             this->resize(max_beam_size, new_len_buf);
         }
         num_new_tasks = new_tasks.size();
@@ -1345,6 +1349,8 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
         if (config.enable_prompt_caching) {
             save_prompt_cache();
         }
+
+        // 没有decode输出，只能是chunked prefill的一部分
         if (logits_all.numel() == 0) {
             BM_ASSERT(in_chunking(), "");
             max_batch_active = 1;
@@ -1352,6 +1358,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
         }
 
         size_t logits_dim = searcher->model_->vocab_size;
+        // chunked prefill仅有最后一个，在这之前剔除了这一个，修改了max_batch_active
         logits_all = logits_all.view({max_batch_active, max_beam_size, logits_dim });
         if (hidden.numel())
             hidden = hidden.view({max_batch_active, max_beam_size, hidden.size(-1) });
@@ -1360,6 +1367,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
         pick_top_k(logits_all, hidden, h_placement, h_prob_prev);
         // ctx.release_device();
 
+        // 清理分数肯定不达标的句子
         for (len_t b = 0; b < max_batch_active; ++b) {
             if (!next_tokens[b].empty()) {
                 float best_score = next_tokens[b][0].log_prob / float(steps[b] + 1);
@@ -1368,13 +1376,15 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
                 }
                 if (!result_mgr[b].accept_score(best_score)) {
                     // stop search, because current result's score is too small
-                    next_tokens[b].clear();
+                    next_tokens[b].clear(); // 这里可能产生空洞batch，下边会重排序
                 }
             }
             steps[b]++;
             if (steps[b] == 1 && tasks[b])
                 tasks[b]->first_token_delay_ms = (logger::get_time_us() - tasks[b]->begin_ts) / 1000;
         }
+
+        // TODO1: broadcast max_batch_active & tasks & next_tokens & chunking_b
 
         /** ------------------------------ Fill result ------------------------------- **/
         active_count = 0;
@@ -1398,14 +1408,14 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
                 }
                 // std::cout << "Finish task " << b << "\n";
             }
-            if (tasks[b] && tasks[b]->canceled) {
+            if (tasks[b] && tasks[b]->canceled) { // TODO: need broadcast
                 tasks[b].reset();
                 std::cout << "Cancel search task " << b << "\n";
             }
             if (tasks[b]) {
                 active_count++;
-                max_batch_active = b + 1;
-            } else if (config.rag_buffer) {
+                max_batch_active = b + 1; 
+            } else if (config.rag_buffer) { // 这里释放了空洞部分
                 erase_task(b);
                 b--;
                 max_batch_active1--;
@@ -1638,7 +1648,7 @@ void SearcherImplV1<int, int>::pick_top_k(
             }
         }
 
-        bm[b].release_buffer(&h_placement(b, 0), hyp_num);
+        bm[b].release_buffer(&h_placement(b, 0), hyp_num); // 这里release上一轮输入的引用，下一轮输入的引用已经inc了
     }
 }
 

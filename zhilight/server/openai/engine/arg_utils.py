@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import argparse
 import dataclasses
@@ -9,6 +10,7 @@ from zhilight.server.openai.basic.config import EngineConfig
 from zhilight.loader import LLaMALoader
 from zhilight.dynamic_batch import DynamicBatchConfig
 from zhilight.quant import QuantConfig, QuantType
+from zhilight.config.dist_config import DistConfig
 
 
 @dataclass
@@ -25,6 +27,10 @@ class EngineArgs:
     dyn_max_beam_size: int = 4
     ignore_eos: bool = False
     enable_cpm_chat: bool = False
+    tensor_parallel: int = -1
+    dist_init_addr: Optional[str] = None
+    nnodes: int = 1
+    node_rank: int = 0
 
     def __post_init__(self):
         pass
@@ -97,6 +103,31 @@ class EngineArgs:
                             action='store_true',
                             help='Ignore eos for pressure test.')
 
+
+        parser.add_argument('--tensor-parallel',
+                            '-tp',
+                            type=str,
+                            default=EngineArgs.tensor_parallel,
+                            help='Tensor parallel number, -1 means use all gpus, 0 means no use tensor parallel.')
+
+        parser.add_argument(
+            "--dist-init-addr",
+            type=str,
+            default=None,
+            help="The host address of multi-nodes server, e.g., `10.98.240.4:2025`.")
+    
+        parser.add_argument(
+            "--nnodes",
+            type=int,
+            default=1,
+            help="The number of nodes in the multi-nodes server.")
+
+        parser.add_argument(
+            "--node-rank",
+            type=int,
+            default=0,
+            help="The node rank, range in [0, nndoes-1].")
+
         return parser
 
     @classmethod
@@ -147,6 +178,23 @@ class EngineArgs:
             key = self.quantization.lower()
             if key in _map:
                 q_type = _map[key]
+        
+        if self.nnodes <= 1:
+            self.nnodes = 1
+            self.node_rank = 0
+        if self.nnodes > 1:
+            assert self.node_rank >= 0 and self.node_rank < self.nnodes, f"The node rank should be in range [0, {self.nnodes-1}]."
+            IP_PORT=r"^((?:[0-9]|[1-9][0-9]|1[0-9]{2}|2([0-4][0-9]|5[0-5]))\.){3}" \
+                    r"(?:[0-9]|[1-9][0-9]|1[0-9]{2}|2([0-4][0-9]|5[0-5])):(\d{1,5})$"
+            assert re.match(IP_PORT, self.dist_init_addr), f"Invalid IP:PORT address: {self.dist_init_addr}"
+        
+        tp = 0 if self.disable_tensor_parallel else self.tensor_parallel
+        dist_config = DistConfig(
+            tp = tp,
+            dist_init_addr = self.dist_init_addr,
+            nnodes = self.nnodes,
+            node_rank = self.node_rank
+        )
             
         return EngineConfig(
             model_path = self.model_path,
@@ -157,7 +205,7 @@ class EngineArgs:
             model_config = model_config,
             dyn_batch_config = dyn_batch_config,
             quant_config = QuantConfig(type = q_type),
-            enable_tensor_parallel = not self.disable_tensor_parallel,
+            dist_config = dist_config,
             max_model_len = self.max_model_len,
             is_chatml = self.enable_cpm_chat,
         )

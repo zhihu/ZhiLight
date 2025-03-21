@@ -19,6 +19,13 @@ struct DeviceConfiguration {
         : device_id(device_id), memory_limit(memory_limit) { }
 };
 
+struct DistConfiguration {
+    int tp { -1 };
+    std::string dist_init_addr;
+    int nnodes { 1 };
+    int node_rank { 0 };
+};
+
 struct GPUInfo {
     int real_device_idx;
     int compute_capability;
@@ -34,7 +41,7 @@ class BMENGINE_EXPORT Engine {
     std::unique_ptr<EngineImpl> pimpl;
 
 public:
-    Engine(const std::vector<DeviceConfiguration>& cfg, int tp = 0);
+    Engine(const std::vector<DeviceConfiguration>& dev_cfg, const DistConfiguration& dist_cfg);
     ~Engine();
 
     Context create_context(const std::vector<int>& devices) const;
@@ -42,6 +49,7 @@ public:
     Context create_context_rank(int rank) const;
     int num_gpus() const;
     int world_size() const;
+    int local_ranks() const;
     GPUInfo get_gpu_info(int device_idx) const;
 
     // Disable copy

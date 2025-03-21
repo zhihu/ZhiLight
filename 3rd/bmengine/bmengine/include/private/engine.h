@@ -10,6 +10,9 @@
 #include "private/allocator.h"
 #include "private/stream.h"
 
+namespace c10d {
+class HostCommunicator;
+}
 namespace bmengine {
 
 namespace core {
@@ -20,13 +23,25 @@ public:
     cudaStream_t stream;
     cublasHandle_t cublas_handle;
     ncclComm_t comm;
-    int rank;
+
+    // the following four parameters determine the weights range of the model
+    int tp_rank;
+    int tp_ranks;
+    int pp_rank;
+    int pp_ranks;
+
     int compute_capability;
     int mp_count;
     int l2_cache_size;
     int max_shared_memory;
 
-    DeviceHandles(int dev_id, ncclUniqueId uniqueID, int rank, int world_size);
+    DeviceHandles(
+        int dev_id,
+        ncclUniqueId uniqueID,
+        int tp_rank = 0,
+        int tp_ranks = 1,
+        int pp_rank = 0,
+        int pp_ranks = 1);
     ~DeviceHandles();
     DeviceHandles(const DeviceHandles&) = delete;
     DeviceHandles& operator=(const DeviceHandles&) = delete;
@@ -43,9 +58,12 @@ class EngineImpl {
     std::vector<StreamAllocator*> streams;
     std::vector<std::mutex*> device_lock;
     std::vector<TaskThreadPool*> device_threads;
+    // for host
+    c10d::HostCommunicator* hc;
     // for nccl
     std::vector<ncclUniqueId> uniqueIDs;
     int world_size_;
+    int local_ranks_;
 
     int debug;
     bool is_mem_frozen { false };
