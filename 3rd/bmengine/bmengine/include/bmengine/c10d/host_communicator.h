@@ -7,6 +7,7 @@ class context_t;
 class socket_t;
 }
 
+namespace bmengine {
 namespace c10d {
 
 class HostCommunicator {
@@ -35,3 +36,4 @@ private:
 };
 
 } // namespace c10d
+} // namespace bmengine

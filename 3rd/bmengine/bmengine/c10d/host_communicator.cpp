@@ -4,6 +4,7 @@
 #include <chrono>
 #include <iostream>
 
+namespace bmengine {
 namespace c10d {
 
 HostCommunicator::HostCommunicator(std::string addr, int nnodes, int node_rank) {
@@ -62,3 +63,4 @@ void HostCommunicator::broadcast_data(char **data, int *nbytes) {
 }
 
 } // namespace c10d
+} // namespace bmengine
