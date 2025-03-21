@@ -113,7 +113,7 @@ EngineImpl::EngineImpl(const std::vector<DeviceConfiguration>& dev_cfgs, const D
             BM_NCCL_ASSERT(ncclGetUniqueId(&uniqueIDs[i]));
         }
     }
-    hc->broadcast(&data, &nbytes);
+    hc->broadcast_data(&data, &nbytes);
 
     ncclGroupStart();
     local_ranks_ = 0;
