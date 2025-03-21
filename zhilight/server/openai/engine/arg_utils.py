@@ -106,7 +106,7 @@ class EngineArgs:
 
         parser.add_argument('--tensor-parallel',
                             '-tp',
-                            type=str,
+                            type=int,
                             default=EngineArgs.tensor_parallel,
                             help='Tensor parallel number, -1 means use all gpus, 0 means no use tensor parallel.')
 
