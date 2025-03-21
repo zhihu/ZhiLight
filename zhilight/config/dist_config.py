@@ -28,5 +28,5 @@ class DistConfig(object):
             self.node_rank,
         )
     
-    def __str__(self):
+    def __repr__(self):
         return f"DistConfig(tp={self.tp}, dist_init_addr={self.dist_init_addr}, nnodes={self.nnodes}, node_rank={self.node_rank})"
