@@ -26,7 +26,7 @@ static inline int get_int_env(const char* name, int def_val = 0) {
     return env_str != nullptr ? std::atoi(env_str) : def_val;
 }
 
-DeviceHandles::DeviceHandles(int dev_id, ncclUniqueId uniqueID, int tp_rank, int tp_ranks, int pp_rank)
+DeviceHandles::DeviceHandles(int dev_id, ncclUniqueId uniqueID, int tp_rank, int tp_ranks, int pp_rank, int pp_ranks)
     : dev_id(dev_id), tp_rank(tp_rank), tp_ranks(tp_ranks), pp_rank(pp_rank), pp_ranks(pp_ranks) {
     DeviceGuard guard(dev_id);
     BM_CUDART_ASSERT(cudaStreamCreate(&stream));
@@ -274,8 +274,8 @@ void Engine::device_foreach(std::function<void(int)> fn) {
     pimpl->device_foreach(fn);
 }
 
-Engine::Engine(const std::vector<DeviceConfiguration>& cfg, int tp)
-    : pimpl(new EngineImpl(cfg, tp)) {}
+Engine::Engine(const std::vector<DeviceConfiguration>& cfg, const DistConfiguration& dist_cfg)
+    : pimpl(new EngineImpl(cfg, dist_cfg)) {}
 
 Engine::~Engine() { }
 
