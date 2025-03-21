@@ -44,7 +44,7 @@ void define_quant_config(py::module_& m) {
 
 DistConfiguration create_dist_config(int tp, std::string dist_init_addr, int nnodes, int node_rank) {
     DistConfiguration config{};
-    config.tp = parallel;
+    config.tp = tp;
     config.dist_init_addr = dist_init_addr;
     config.nnodes = nnodes;
     config.node_rank = node_rank;

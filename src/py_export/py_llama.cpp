@@ -66,8 +66,8 @@ public:
         EnginePtr engine,
         model::ModelConfig& model_config,
         model::QuantConfig quant_config,
-        bool parallel = false) {
-        return PyLLaMA(engine, model_config, quant_config, parallel);
+        bmengine::core::DistConfiguration dist_config) {
+        return PyLLaMA(engine, model_config, quant_config, dist_config);
     }
 
     virtual bmengine::core::Engine* engine() {
