@@ -32,13 +32,15 @@ public:
         model::ModelConfig model_config,
         model::QuantConfig quant_config,
         bmengine::core::DistConfiguration dist_config)
-        : PyModelBase("llama", parallel), engine_(engine), model_config_(model_config) {
+        : PyModelBase("llama", false), engine_(engine), model_config_(model_config) {
         std::cout << model_config.to_string() << std::endl;
 
         bool parallel = false;
         if (dist_config.tp > 1 || (dist_config.tp < 0 && (engine->num_gpus() > 1 || dist_config.nnodes > 1))) {
             parallel = true;
         }
+        set_parallel(parallel);
+
         models_.resize(engine->local_ranks());
         engine->device_foreach([this, &model_config, quant_config, parallel](int i) {
             auto ctx = engine_->create_context_rank(i);
