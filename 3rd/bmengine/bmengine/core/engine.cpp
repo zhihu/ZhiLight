@@ -74,6 +74,7 @@ DeviceHandles::~DeviceHandles() {
 
 EngineImpl::EngineImpl(const std::vector<DeviceConfiguration>& dev_cfgs, const DistConfiguration& dist_cfg)
     : debug(0) {
+    std::cout << "tp=" << dist_cfg.tp << ", nnodes=" << dist_cfg.nnodes << ", node_rank=" << dist_cfg.node_rank << std::endl;
     int tp_ranks = dist_cfg.tp;
     int local_dev_count = static_cast<int>(dev_cfgs.size());
     int total_dev_count = local_dev_count * dist_cfg.nnodes;

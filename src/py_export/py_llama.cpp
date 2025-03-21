@@ -34,6 +34,7 @@ public:
         bmengine::core::DistConfiguration dist_config)
         : PyModelBase("llama", false), engine_(engine), model_config_(model_config) {
         std::cout << model_config.to_string() << std::endl;
+        std::cout << "tp=" << dist_config.tp << ", nnodes=" << dist_config.nnodes << ", node_rank=" << dist_config.node_rank << std::endl;
 
         bool parallel = false;
         if (dist_config.tp > 1 || (dist_config.tp < 0 && (engine->num_gpus() > 1 || dist_config.nnodes > 1))) {
