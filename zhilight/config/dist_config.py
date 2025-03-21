@@ -23,7 +23,10 @@ class DistConfig(object):
     def to_c_config(self):
         return C.DistConfig(
             self.tp,
-            self.dist_init_addr,
+            self.dist_init_addr if self.dist_init_addr else "",
             self.nnodes,
             self.node_rank,
         )
+    
+    def __str__(self):
+        return f"DistConfig(tp={self.tp}, dist_init_addr={self.dist_init_addr}, nnodes={self.nnodes}, node_rank={self.node_rank})"
