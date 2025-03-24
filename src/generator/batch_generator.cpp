@@ -1315,7 +1315,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
                 std::cout << "broadcast recv!" << std::endl;
             }
             std::cout << "New tasks: " << new_tasks.size() << "IDs: " << std::endl;
-            for (int i = 0; new_tasks.size > 0 && i < new_tasks[0]->input_tokens.size(); ++i) {
+            for (int i = 0; new_tasks.size() > 0 && i < new_tasks[0]->input_tokens.size(); ++i) {
                 std::cout << new_tasks[0]->input_tokens[i] << " ";
             }
             std::cout << std::endl;
