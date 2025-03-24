@@ -78,6 +78,7 @@ async def lifespan(app: fastapi.FastAPI):
     await engine.stop()
 
 app = fastapi.FastAPI(lifespan=lifespan)
+fake_app = fastapi.FastAPI(lifespan=lifespan)
 
 
 # Add prometheus asgi middleware to route /metrics requests
@@ -86,6 +87,7 @@ app.mount("/metrics", metrics_app)
 
 
 @app.exception_handler(RequestValidationError)
+@fake_app.exception_handler(RequestValidationError)
 async def validation_exception_handler(_, exc):
     err = openai_serving_chat.create_error_response(message=str(exc))
     return JSONResponse(err.model_dump(), status_code=HTTPStatus.BAD_REQUEST)
@@ -93,6 +95,8 @@ async def validation_exception_handler(_, exc):
 
 @app.get("/health")
 @app.get("/api/check_health")
+@fake_app.get("/health")
+@fake_app.get("/api/check_health")
 async def health() -> Response:
     """Health check."""
     # TODO: check model status
@@ -150,6 +154,8 @@ if __name__ == "__main__":
     args = parse_args()
 
     logger.info(f"ZhiLight OpenAI-Compatible Server version {engine_version}.")
+    if args.node_rank > 0:
+        app = fake_app
 
     if args.enable_prefix_caching: # FixME
         os.environ["enable_prompt_caching"] = "1"
