@@ -56,8 +56,8 @@ void HostCommunicator::broadcast_data(char **data, int *nbytes) {
         sock_->send(msg0);
         zmq::message_t msg;
         sock_->recv(&msg);
-        *data = new char[msg.size()];
-        *nbytes = msg.size();
+        //*data = new char[msg.size()];
+        //*nbytes = msg.size();
         memcpy(*data, msg.data(), *nbytes);
     }
 }
