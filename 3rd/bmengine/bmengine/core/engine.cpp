@@ -213,6 +213,13 @@ int EngineImpl::num_gpus() const {
     return handles.size();
 }
 
+int nnodes() const {
+    return hc->get_nnodes();
+}
+int node_rank() const {
+    return hc->get_node_rank();
+}
+
 GPUInfo EngineImpl::get_gpu_info(int dev_id) {
     BM_ASSERT(
         dev_id >= 0 && dev_id < handles.size(), "invalid device id: " + std::to_string(dev_id));
