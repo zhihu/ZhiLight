@@ -1,5 +1,6 @@
 #pragma once
 #include "bmengine/core/export.h"
+#include "private/engine.h"
 #include <memory>
 #include <vector>
 #include <functional>
@@ -34,7 +35,7 @@ struct GPUInfo {
     size_t alloc_memory;
 };
 
-class EngineImpl;
+//class EngineImpl;
 // Engine can be accessed from multiple threads.
 class BMENGINE_EXPORT Engine {
     friend class DistributedTensorImpl;
