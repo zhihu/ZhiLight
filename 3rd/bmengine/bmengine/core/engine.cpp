@@ -12,6 +12,7 @@
 #include <thread>
 #include <cublas_v2.h>
 #include <curand.h>
+#include <cstdio>
 
 #include "private/guard.h"
 #include "private/engine.h"
@@ -114,6 +115,11 @@ EngineImpl::EngineImpl(const std::vector<DeviceConfiguration>& dev_cfgs, const D
             BM_NCCL_ASSERT(ncclGetUniqueId(&uniqueIDs[i]));
         }
     }
+    printf("UniqueID: ");
+    for (int i = 0; i < 128; i++) {
+        printf("%02x", (unsigned char)(data[i]));
+    }
+    printf("\n");
     hc->broadcast_data(&data, &nbytes);
 
     ncclGroupStart();
