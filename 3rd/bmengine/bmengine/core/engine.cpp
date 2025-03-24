@@ -120,7 +120,7 @@ EngineImpl::EngineImpl(const std::vector<DeviceConfiguration>& dev_cfgs, const D
         printf("%02x", (unsigned char)(data[i]));
     }
     printf("\n");
-    hc->broadcast_data(&data, &nbytes);
+    hc->broadcast_data(data, nbytes);
 
     ncclGroupStart();
     local_ranks_ = 0;
@@ -331,10 +331,6 @@ int Engine::nnodes() const {
 }
 int Engine::node_rank() const {
     return this->pimpl->node_rank();
-}
-
-void Engine::broadcast_data(char **data, int *nbytes) {
-    pimpl->hc->broadcast_data(data, nbytes);
 }
 
 int Engine::num_gpus() const {

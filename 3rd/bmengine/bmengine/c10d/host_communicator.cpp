@@ -12,6 +12,8 @@ HostCommunicator::HostCommunicator(std::string addr, int nnodes, int node_rank) 
     nnodes_ = nnodes;
     node_rank_ = node_rank;
 
+    buffer_.resize(4 * 1024 * 1024); // 4M
+
     if (nnodes_ > 1) {
         ctx_ = new zmq::context_t(1);
         if (node_rank == 0) {
@@ -39,26 +41,6 @@ HostCommunicator::~HostCommunicator() {
         sock_->close();
         delete sock_;
         delete ctx_;
-    }
-}
-
-void HostCommunicator::broadcast_data(char **data, int *nbytes) {
-    if (node_rank_ == 0) {
-        for (int i = 1; i < nnodes_; ++i) {
-            zmq::message_t msg0(0);
-            sock_->recv(&msg0);
-            zmq::message_t msg(*nbytes);
-            memcpy(msg.data(), *data, *nbytes);
-            sock_->send(msg);
-        }
-    } else {
-        zmq::message_t msg0(0);
-        sock_->send(msg0);
-        zmq::message_t msg;
-        sock_->recv(&msg);
-        //*data = new char[msg.size()];
-        *nbytes = msg.size();
-        memcpy(*data, msg.data(), *nbytes);
     }
 }
 

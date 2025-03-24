@@ -52,7 +52,10 @@ public:
     int local_ranks() const;
     int nnodes() const;
     int node_rank() const;
-    void broadcast_data(char **data, int *nbytes);
+    template <typename T>
+    void broadcast_data(T &data, int nbytes = 0) {
+        pimpl->hc->broadcast_data(data, nbytes);
+    }
     GPUInfo get_gpu_info(int device_idx) const;
 
     // Disable copy
