@@ -66,11 +66,15 @@ len_t round_up_len(len_t len, len_t d = 32) {
 void SearchTask_::finish(generator::SearchResults&& results) {
     BM_ASSERT(!results.results.empty(), "finish without result!");
     callback(results);
-    res_queue.emplace(std::move(results));
+    if (!canceled) {
+        res_queue.emplace(std::move(results));
+    }
 }
 
 void SearchTask_::update_stream(const generator::SearchResults& results) {
-    res_queue.push(results, true);
+    if (!canceled) {
+        res_queue.push(results, true);
+    }
 }
 
 TaskQueue::TaskQueue(int max_size) : max_size_(max_size) {}
@@ -1433,7 +1437,8 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
                 }
                 // std::cout << "Finish task " << b << "\n";
             }
-            if (tasks[b] && tasks[b]->canceled) { // TODO: need broadcast
+            // TODO: cancel for multi nodes TP
+            if (searcher->engine_->nnodes() == 1 && tasks[b] && tasks[b]->canceled) {
                 tasks[b].reset();
                 std::cout << "Cancel search task " << b << "\n";
             }

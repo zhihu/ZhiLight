@@ -1,0 +1,18 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../zguide"
+		},
+		{
+			"path": "../cppzmq"
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"vector": "cpp"
+		}
+	}
+}
