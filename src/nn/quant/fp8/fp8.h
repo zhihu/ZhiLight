@@ -22,5 +22,17 @@ core::Tensor dynamic_scaled_quant(
     float MAX_E4M3=448
 );
 
-void mma_fp8(cudaStream_t stream, int8_t *A, int8_t *B, half *C, float alpha, size_t M, size_t N, size_t K);
+core::Tensor per_token_cast_to_fp8(
+    const core::Context& ctx,
+    const core::Tensor& input,
+    float MAX_E4M3=448
+);
+
+core::Tensor dequant_fp8_block_weight(
+    const core::Context& ctx,
+    const core::Tensor& input,
+    const core::Tensor& scale,
+    core::DataType out_type
+);
+
 }
