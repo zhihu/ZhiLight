@@ -1,14 +1,10 @@
 #pragma once
 
+#include "zmq.hpp"
 #include <string>
 #include <sstream>
 #include <boost/archive/binary_iarchive.hpp>
 #include <boost/archive/binary_oarchive.hpp>
-
-namespace zmq {
-class context_t;
-class socket_t;
-}
 
 namespace bmengine {
 namespace c10d {

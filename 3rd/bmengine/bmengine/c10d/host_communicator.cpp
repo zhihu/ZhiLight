@@ -1,5 +1,4 @@
 #include "bmengine/c10d/host_communicator.h"
-#include "zmq.hpp"
 #include <thread>
 #include <chrono>
 #include <iostream>
