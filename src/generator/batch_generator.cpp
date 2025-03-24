@@ -1343,6 +1343,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
         }
         bool feed_input_embedding = !new_tasks.empty() && !new_tasks[0]->input_embeddings.empty();
         if (feed_input_embedding && tasks[0]) { // 为什么要这么做？？？
+            BM_ASSERT(searcher->engine_->nnodes() == 1, "feed_input_embedding only support single node, now");
             int b = assign_free_slot(tasks[0]);
             if (debug_level) std::cout << "Move task 0 to " << b << endl;
             move_task(b, 0); // move tasks[0] to b
@@ -1421,7 +1422,9 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
                 SearchResults results{};
                 results.results = result_mgr[b].get_search_results(num);
                 results.first_token_delay_ms = tasks[b]->first_token_delay_ms;
-                tasks[b]->finish(std::move(results));
+                if (searcher->engine_->node_rank() == 0) {
+                    tasks[b]->finish(std::move(results));
+                }
                 tasks[b].reset();
                 if (in_chunking()) {
                     BM_ASSERT(chunking_b > 0, "");
@@ -1569,7 +1572,9 @@ void SearcherImplV1<int, int>::update_stream(
         // increasingly update
         if (word_id != config.eos_id) {
             stream_res[b].stream.append(word_id);
-            tasks[b]->update_stream(stream_res[b]);
+            if (searcher->engine_->node_rank() == 0) {
+                tasks[b]->update_stream(stream_res[b]);
+            }
         }
     } else {
         // full update
@@ -1577,7 +1582,9 @@ void SearcherImplV1<int, int>::update_stream(
         auto tmp_res = bm[b].get_hypo_tokens(word_id, is_eos, last_hypo_pos);
         BM_ASSERT(tmp_res.size() > 0, "No results");
         stream_res[b].stream.update(std::move(tmp_res), t);
-        tasks[b]->update_stream(stream_res[b]);
+        if (searcher->engine_->node_rank() == 0) {
+            tasks[b]->update_stream(stream_res[b]);
+        }
     }
 }
 

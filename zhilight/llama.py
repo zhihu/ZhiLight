@@ -132,6 +132,7 @@ class LLaMA:
         c_quant_config = quant_config_to_c(self._quant_config)
         if dist_config is None:
             dist_config = DistConfig()
+        self.dist_config = dist_config
         c_dist_config = dist_config.to_c_config()
 
         self._context = None  # Reserve for future usage
