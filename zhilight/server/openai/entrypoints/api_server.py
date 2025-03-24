@@ -111,6 +111,7 @@ async def show_available_models():
 
 
 @app.get("/version")
+@fake_app.get("/version")
 async def show_version():
     ver = {"version": engine_version}
     return JSONResponse(content=ver)
