@@ -1289,7 +1289,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
                 ctx.use_cache_alloc(false);
             }
             int limit = 1; // dual_stream ? 1 : max_batch - active_count;
-            vector<SearchTask> new_tasks;
+            //vector<SearchTask> new_tasks;
             if (searcher->engine_->node_rank() == 0) {
                 new_tasks = searcher->queue_.pop_multi(
                     limit, active_count == 0, 1, max_total_token, pre_alloc);
@@ -1306,13 +1306,13 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
                 }
             } else {
                 // TODO:
-                vector<SearchTask> buffer(limit);
-                char *data = reinterpret_cast<char*>(buffer.data());
+                char *data = new char[128*1024*1024];
                 int nbytes = 0;
                 searcher->engine_->broadcast_data(&data, &nbytes);
                 vector<char> new_buffer(data, data + nbytes);
                 deserialize_from_buffer(new_buffer, new_tasks);
                 std::cout << "broadcast recv!" << std::endl;
+                delete [] data;
             }
             std::cout << "New tasks: " << new_tasks.size() << "IDs: " << std::endl;
             for (int i = 0; new_tasks.size() > 0 && i < new_tasks[0]->input_tokens.size(); ++i) {
