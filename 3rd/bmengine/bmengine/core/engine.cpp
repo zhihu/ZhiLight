@@ -319,6 +319,17 @@ int Engine::local_ranks() const {
     return this->pimpl->local_ranks_;
 }
 
+int Engine::nnodes() const {
+    return this->pimpl->nnodes();
+}
+int Engine::node_rank() const {
+    return this->pimpl->node_rank();
+}
+
+void Engine::broadcast_data(char **data, int *nbytes) {
+    pimpl->hc->broadcast_data(data, nbytes);
+}
+
 int Engine::num_gpus() const {
     return this->pimpl->num_gpus();
 }

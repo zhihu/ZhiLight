@@ -12,8 +12,8 @@
 #include <thread>
 #include <queue>
 #include <vector>
-#include <boost/archive/text_oarchive.hpp>
-#include <boost/archive/text_iarchive.hpp>
+#include <boost/archive/binary_oarchive.hpp>
+#include <boost/archive/binary_iarchive.hpp>
 #include <boost/serialization/vector.hpp>
 #include <boost/serialization/map.hpp>
 #include <boost/serialization/shared_ptr.hpp>
@@ -155,5 +155,22 @@ public:
     void stop();
     void run();
 };
+
+template<typename T>
+void serialize_to_buffer(const T& data, std::vector<char>& buffer) {
+    std::ostringstream oss(std::ios::binary);
+    boost::archive::binary_oarchive oa(oss);
+    oa << data;
+    
+    const std::string& str = oss.str();
+    buffer.assign(str.begin(), str.end());
+}
+
+template<typename T>
+void deserialize_from_buffer(const std::vector<char>& buffer, T& data) {
+    std::istringstream iss(std::string(buffer.begin(), buffer.end()), std::ios::binary);
+    boost::archive::binary_iarchive ia(iss);
+    ia >> data;
+}
 
 }  // namespace batch_generator

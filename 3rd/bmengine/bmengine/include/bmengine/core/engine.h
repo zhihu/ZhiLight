@@ -50,6 +50,9 @@ public:
     int num_gpus() const;
     int world_size() const;
     int local_ranks() const;
+    int nnodes() const;
+    int node_rank() const;
+    void broadcast_data(char **data, int *nbytes);
     GPUInfo get_gpu_info(int device_idx) const;
 
     // Disable copy

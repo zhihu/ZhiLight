@@ -143,9 +143,6 @@ vector<SearchTask> TaskQueue::pop_multi(int limit, bool wait, int require, int m
     }
     if (!tasks.empty())
         can_push_cond_.notify_one();
-    std::ofstream ofs("tasks.txt");
-    boost::archive::text_oarchive oa(ofs);
-    oa << tasks;
     return tasks;
 }
 
@@ -1292,11 +1289,36 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
                 ctx.use_cache_alloc(false);
             }
             int limit = 1; // dual_stream ? 1 : max_batch - active_count;
-            new_tasks = searcher->queue_.pop_multi(
-                limit, active_count == 0, 1, max_total_token, pre_alloc);
-            for (auto task: new_tasks) {
-                task->begin_ts = logger::get_time_us();
+            vector<SearchTask> new_tasks;
+            if (searcher->engine_->node_rank() == 0) {
+                new_tasks = searcher->queue_.pop_multi(
+                    limit, active_count == 0, 1, max_total_token, pre_alloc);
+                for (auto task: new_tasks) {
+                    task->begin_ts = logger::get_time_us();
+                }
+                if (searcher->engine_->nnodes() > 1) {
+                    std::vector<char> buffer;
+                    serialize_to_buffer(new_tasks, buffer);
+                    char *data = buffer.data();
+                    int nbytes = buffer.size();
+                    searcher->engine_->broadcast_data(&data, &nbytes);
+                    std::cout << "broadcast send!" << std::endl;
+                }
+            } else {
+                // TODO:
+                vector<SearchTask> buffer(limit);
+                char *data = reinterpret_cast<char*>(buffer.data());
+                int nbytes = 0;
+                searcher->engine_->broadcast_data(&data, &nbytes);
+                vector<char> new_buffer(data, data + nbytes);
+                deserialize_from_buffer(buffer, new_tasks);
+                std::cout << "broadcast recv!" << std::endl;
             }
+            std::cout << "New tasks: " << new_tasks.size() << "IDs: " << std::endl;
+            for (int i = 0; new_tasks.size > 0 && i < new_tasks[0]->input_tokens.size(); ++i) {
+                std::cout << new_tasks[0]->input_tokens[i] << " ";
+            }
+            std::cout << std::endl;
         }
         // TODO: broadcast new_tasks
 

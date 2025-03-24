@@ -97,6 +97,8 @@ public:
     GPUInfo get_gpu_info(int dev_id);
     int num_gpus() const;
     int world_size() const { return world_size_; }
+    int nnodes() const { return hc->get_nnodes(); }
+    int node_rank() const { return hc->get_node_rank(); }
 
     void print_memory_summary();
     void freeze_model_memory();
