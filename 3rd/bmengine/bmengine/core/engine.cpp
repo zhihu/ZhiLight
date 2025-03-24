@@ -213,10 +213,10 @@ int EngineImpl::num_gpus() const {
     return handles.size();
 }
 
-int nnodes() const {
+int EngineImpl::nnodes() const {
     return hc->get_nnodes();
 }
-int node_rank() const {
+int EngineImpl::node_rank() const {
     return hc->get_node_rank();
 }
 
