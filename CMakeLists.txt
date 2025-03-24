@@ -88,15 +88,16 @@ message("FLASH_ATTN_SO: " ${FLASH_ATTN_SO})
 
 target_include_directories(backend
     PUBLIC "src"
-    PUBLIC "3rd/tensorrt_llm/"
     PUBLIC "3rd/flash_decoding"
+    PUBLIC "3rd/flash_mla"
     PUBLIC ${NCCL_INCLUDE_DIRS}
     PUBLIC ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
     PUBLIC ${Python_SITELIB}/torch/include
 )
 
 target_link_directories(backend
-    PUBLIC "3rd/tensorrt_llm/"
+    PUBLIC "3rd/deep_gemm/"
+    PUBLIC "3rd/flash_mla/"
     PUBLIC ${NCCL_LIBRARIES}
     PUBLIC ${Python_SITELIB}/torch/lib
     PUBLIC ${Python_SITELIB}
@@ -106,6 +107,8 @@ target_link_libraries(backend
     PUBLIC bmengine
     "-Wl,-Bsymbolic -Wl,-Bsymbolic-functions"
     ":${FLASH_ATTN_SO}"
+    "deep_gemm"
+    "flash_mla"
 )
 
 file(GLOB_RECURSE PYBIND_SOURCES "src/py_export/*.cpp")

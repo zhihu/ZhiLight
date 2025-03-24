@@ -2,6 +2,7 @@
 
 #include <bmengine/core/core.h>
 #include <bmengine/functions/all.h>
+#include "bmengine/functions/reduce.cuh"
 #include <bmengine/logger/std_log_op.hpp>
 #include <assert.h>
 
@@ -11,9 +12,10 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_fp8.h>
 #include <assert.h>
-#include "../awq/awq.h"
 #include "fp8.h"
+
 
 __device__ __forceinline__ uint16_t half2_to_e4m3(const uint32_t a)
 {
@@ -223,6 +225,151 @@ core::Tensor dynamic_scaled_quant(
 
     out.quant_scale = std::make_shared<core::Tensor>();
     *out.quant_scale = scale;
+    return out;
+}
+
+// (m, n/128), 32
+template<class HALF_T>
+__global__ void KERNEL_per_token_cast_to_fp8(
+    const HALF_T *__restrict__ g_in, // (m, n)
+    uint8_t *__restrict__ g_out,    // (m, n)
+    uint32_t aligned_m,
+    float* scale_ptr // (n/128, aligned_m)
+) {
+    uint32_t N = gridDim.y * 128;
+    // each thread process 4 x half
+    HALF_T in_h[4];
+    float in_f[4];
+    // read 4 x half
+    size_t offset = blockIdx.x * N + blockIdx.y * 128 + threadIdx.x * 4;
+    *(double*)&in_h = *(const double*)(g_in + offset);
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        in_f[i] = in_h[i];
+    }
+    // amax
+    float amax = 0;
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        amax = fmaxf(amax, fabs(in_f[i]));
+    }
+    amax = bmengine::functions::warpReduceMaxB(amax);
+    if (amax < 1e-4)
+        amax = 1e-4; // clamp
+
+    // convert
+    __nv_fp8_e4m3 out_fp8[4];
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        out_fp8[i] = __nv_fp8_e4m3(in_f[i] * (448.0f / amax));
+    }
+    // write 4 X fp8
+    *(int*)(g_out + offset) = *(int*)out_fp8;
+
+    size_t offset_scale = blockIdx.y * aligned_m + blockIdx.x;
+    if (threadIdx.x == 0)
+        scale_ptr[offset_scale] = amax / 448.0f;
+}
+
+// Python code:
+//def per_token_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+//    assert x.dim() == 2 and x.size(1) % 128 == 0
+//    m, n = x.shape
+//    x_view = x.view(m, -1, 128)
+//    x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
+//    return (x_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn).view(m, n), (x_amax / 448.0).view(m, -1)
+core::Tensor per_token_cast_to_fp8(
+    const core::Context& ctx,
+    const core::Tensor& input,
+    float MAX_E4M3
+) {
+    const cudaStream_t stream = ctx.current_stream()->ptr;
+    BM_ASSERT_EQ(input.ndim(), 2, "FP8 block_scale: input is not 2D");
+    BM_ASSERT_EQ(input.size(1) % 128, 0, "FP8 block_scale: input.size(1) can't divide 128");
+
+    size_t m = input.size(0);
+    size_t n = input.size(1);
+    size_t round_up_size = std::max(32 * input.size(-1), 1024UL);
+    core::Tensor out = ctx.tensor(input.shape(), core::DataType::kFP8_E4M3, "", round_up_size);
+
+    size_t aligned_m = round_up(m, 16 / sizeof(float));
+    core::Tensor scale = ctx.tensor({n / 128UL, aligned_m}, core::DataType::kFloat);
+
+    dim3 block(1024);
+    dim3 grid(m, n / 128);
+    BM_DTYPE_DISPATCH_HALF(input.dtype(), {
+        KERNEL_per_token_cast_to_fp8<scalar_t><<<grid, 32, 0, stream>>>(
+            input.data<scalar_t>(),
+            out.data<uint8_t>(),
+            aligned_m,
+            scale.mutable_data<float>());
+    });
+    BM_CUDART_ASSERT(cudaGetLastError());
+
+    out.quant_scale = std::make_shared<core::Tensor>();
+    *out.quant_scale = scale;
+    return out;
+}
+
+// (m, n/128), 32
+template<class HALF_T>
+__global__ void KERNEL_dequant_fp8_block(
+    const uint8_t *__restrict__ g_in, // (m, n)
+    HALF_T *__restrict__ g_out,       // (m, n)
+    const float* scale_ptr, // round_up(m, 128) / 128, round_up(n, 128) / 128
+    const uint32_t N,
+    uint32_t stride_scale
+) {
+    uint32_t n = blockIdx.y * 128 + threadIdx.x * 4;
+    if (n >= N) return;
+
+    // each thread process 4 x fp8
+    __nv_fp8_e4m3 in[4];
+    // read 4 x fp8
+    size_t offset = blockIdx.x * N + n;
+    *(uint32_t*)&in = *(const uint32_t*)(g_in + offset);
+
+    size_t offset_scale = (blockIdx.x / 128) * stride_scale + blockIdx.y;
+    float scale = scale_ptr[offset_scale];
+
+    // convert
+    HALF_T out[4];
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        out[i] = float(in[i]) * scale;
+//        if (blockIdx.x == 9082 && blockIdx.y == 0 && threadIdx.x == 0) {
+//            printf("in=%.5f, scale=%.5f, out=%.5f", float(in[i]), scale, float(out[i]));
+//            assert(!isinf(float(out[i])));
+//        }
+    }
+    // write 4 X fp8
+    *(double *)(g_out + offset) = *(double*)out;
+}
+
+core::Tensor dequant_fp8_block_weight(
+    const core::Context& ctx,
+    const core::Tensor& weight,
+    const core::Tensor& scale, // inv
+    core::DataType out_type
+) {
+    BM_ASSERT_EQ(scale.dtype(), core::DataType::kFloat, "");
+    BM_ASSERT_EQ(weight.ndim(), 2, "weight is not 2d");
+    BM_ASSERT_EQ(scale.ndim(), 2, "weight is not 2d");
+    BM_ASSERT_LE(weight.size(0), scale.size(0) * 128, "weight and scale dim0 mismatch");
+    BM_ASSERT_LE(weight.size(1), scale.size(1) * 128, "weight and scale dim0 mismatch");
+
+    core::Tensor out = ctx.tensor(weight.shape(), out_type);
+    cudaStream_t stream = ctx.current_stream()->ptr;
+    dim3 gridDim(weight.size(0), scale.size(1));
+    BM_DTYPE_DISPATCH_HALF(out_type, {
+        KERNEL_dequant_fp8_block<scalar_t><<<gridDim, 32, 0, stream>>>(
+            weight.data<uint8_t>(),
+            out.mutable_data<scalar_t>(),
+            scale.data<float>(),
+            weight.size(1),
+            scale.size(1));
+    });
+    BM_CUDART_ASSERT(cudaGetLastError());
     return out;
 }
 

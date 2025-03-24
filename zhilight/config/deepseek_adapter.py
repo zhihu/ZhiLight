@@ -22,7 +22,7 @@ class DeepseekV2Adapter:
         set_env("MOE_DYN_SHARED", 1)
         if is_h20:
             set_env('USE_FLASH_MLA', 2, "Turn on FlashMLA for H20")
-            set_env('ATTN_DATA_PARALLEL', 1)
+            # set_env('ATTN_DATA_PARALLEL', 1)
             set_env('ATTN_DATA_PARALLEL_MIN_BATCH', 4)
         if get_int_env('USE_FLASH_MLA') > 0:
             set_env("KV_CACHE_ALIGN_PAGE", 64)
@@ -43,7 +43,7 @@ class DeepseekV2Adapter:
         quant_config = config.get("quantization_config", {})
         quant_method = quant_config.get("quant_method", "")
         awq_use_exllama(config)
-        if quant_method:
+        if quant_method == "gptq" or quant_method == "awq" and get_int_env("AWQ_USE_EXLLAMA") == 1:
             set_env("FUSE_GPTQ_MOE", 1)
             if config.get("torch_dtype", "") == "bfloat16" and "force_half" not in config:
                 print("WARNING: force convert to half dtype for using GPTQ kernel")

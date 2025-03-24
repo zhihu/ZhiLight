@@ -28,6 +28,8 @@
 #include "utils/exception.h"
 #include "utils/env.h"
 
+#include "../../../3rd/deep_gemm/deep_gemm_api.h"
+
 namespace nn {
 
 using model::ModelContext;
@@ -102,17 +104,37 @@ static Tensor concat3_dim1(const core::Context& ctx, const Tensor& q, const Tens
     return ret;
 }
 
+static vector<size_t> split_shape_dim0(const std::vector<size_t>& shape, size_t n_split) {
+    BM_ASSERT_EQ(shape[0] % n_split, 0, "Not dividable");
+    std::vector<size_t> new_shape = shape;
+    new_shape[0] /= n_split;
+    new_shape.insert(new_shape.begin(), n_split);
+    return new_shape;
+}
+
+vector<Tensor> split_dim1(const core::Context& ctx, const Tensor& t, size_t n_split) {
+    BM_ASSERT_EQ(t.size(1) % n_split, 0, "Not divisible");
+    size_t part_size = t.size(1) / n_split;
+    vector<Tensor> results(n_split);
+    for (size_t i = 0; i < n_split; ++i) {
+        results[i] = functions::slice_last_dim(ctx, t, i * part_size, part_size);
+    }
+    return results;
+}
+
 class Linear::impl {
 public:
     class NormalLinear;
     class Int8Linear;
     class Fp8Linear;
+    class Fp8Block;
     class Int4GPTQ;
     class GPTQMarlin;
     class AWQ;
 
     uint32_t dim_in;
     uint32_t dim_out;
+    bool parallel;
     core::DistLayout dist_layout;
     std::string act_fn_type;
     bool weight_transposed;
@@ -121,8 +143,9 @@ public:
     bool has_bias { false };
     std::string prefix;
 
-    impl(uint32_t dim_in, uint32_t dim_out, std::string act_fn, bool w_trans, int quant, DataType dtype)
-        : dim_in(dim_in), dim_out(dim_out), act_fn_type(act_fn), weight_transposed(w_trans), quant(quant), dtype(dtype) { }
+    impl(uint32_t dim_in, uint32_t dim_out, std::string act_fn, bool w_trans, int quant, DataType dtype, bool parallel)
+        : dim_in(dim_in), dim_out(dim_out),
+          act_fn_type(act_fn), weight_transposed(w_trans), quant(quant), dtype(dtype), parallel(parallel) { }
     virtual ~impl() = default;
 
     virtual void scale_output(float scale) = 0;
@@ -139,6 +162,20 @@ public:
     virtual core::Tensor& get_weight() = 0;
     virtual core::Tensor get_dequant_weight(const core::Context& ctx) {
         throw std::runtime_error("get_dequant_weight is not supported");
+    };
+    core::Tensor dequant_weight_by_mul_diag(const core::Context& ctx, size_t dim) {
+        BM_ASSERT_LE(dim, 20000, "too big dim");
+        std::vector<float> h_diag(dim * dim);
+        for (int i = 0; i < dim; ++i) {
+            for (int j = 0; j < dim; ++j) {
+                h_diag[i * dim + j] = i == j ? 1.f : 0.f;
+            }
+        }
+        core::Tensor diag = ctx.tensor_of(h_diag, {dim, dim});
+        diag = functions::typecast(ctx, diag, dtype);
+        auto w = forward(ctx, diag, "", true, nullptr);
+        w = functions::Transpose(ctx).forward(ctx, w);
+        return w;
     };
     virtual core::Tensor* get_weight_scale() { return nullptr; }
 
@@ -190,7 +227,6 @@ public:
 // =========================== normal linear ===========================
 class Linear::impl::NormalLinear : public Linear::impl {
 public:
-    bool parallel;
     core::DistLayout dist_layout;
     float scale_factor;
     std::unique_ptr<Tensor> weight;
@@ -209,8 +245,7 @@ public:
         bool parallel,
         core::DistLayout dist_layout
         )
-        : Linear::impl(dim_in, dim_out, act_fn_type, weight_transposed, 0, dtype),
-          parallel(parallel),
+        : Linear::impl(dim_in, dim_out, act_fn_type, weight_transposed, 0, dtype, parallel),
           dist_layout(weight_transposed ? dist_layout : transpose_layout(dist_layout)),
           scale_factor(float(scale_weights ? 1.0 / sqrtf(dim_in) : 1.0)),
           gemm_A_B(ctx, dtype, false, false, scale_factor),
@@ -352,7 +387,6 @@ public:
     std::string act_fn_type;
     bool scale_weights;
     bool weight_transposed;
-    bool parallel;
     DistLayout dist_layout;
     int dev;
 
@@ -382,12 +416,11 @@ public:
         core::DataType dtype,
         bool parallel,
         DistLayout dist_layout)
-        : Linear::impl(dim_in, dim_out, act_fn_type, weight_transposed, quant, dtype),
+        : Linear::impl(dim_in, dim_out, act_fn_type, weight_transposed, quant, dtype, parallel),
           weight(ctx.parameter({ dim_out, dim_in }, core::DataType::kInt8)),
           weight_scale(ctx.parameter({ dim_out }, dtype)),
           scale_weights(scale_weights),
           weight_transposed(weight_transposed),
-          parallel(parallel),
           dist_layout(weight_transposed ? dist_layout : transpose_layout(dist_layout)),
           dev(ctx.active_device_idx()) {
         BM_ASSERT(quant >= 0 && quant <= 2, "Wrong quant " + std::to_string(quant));
@@ -557,7 +590,6 @@ public:
     core::Tensor rev_perm;
 
     bool scale_weights;
-    bool parallel;
     DistLayout dist_layout;
     int dev;
     bool act_order { false };
@@ -586,7 +618,7 @@ public:
         bool act_order,
         int group_size,
         bool sym)
-        : Linear::impl(dim_in, dim_out, act_fn_type, false, quant, dtype),
+        : Linear::impl(dim_in, dim_out, act_fn_type, false, quant, dtype, parallel),
           act_order(act_order),
           group_size(group_size),
           sym(sym),
@@ -594,7 +626,6 @@ public:
           qzeros(ctx.parameter({ dim_in / group_size, dim_out / 8 }, DataType::kInt32)),
           scales(ctx.parameter({ dim_in / group_size, dim_out }, dtype)),
           g_idx(ctx.parameter({ dim_in }, DataType::kInt32)),
-          parallel(parallel),
           dist_layout(dist_layout),
           dev(ctx.active_device_idx()) {
         // DistLayout::COLUMNAR => split by dim_out
@@ -660,24 +691,6 @@ public:
         return ret;
     }
 
-    static vector<size_t> split_shape_dim0(const std::vector<size_t>& shape, size_t n_split) {
-        BM_ASSERT_EQ(shape[0] % n_split, 0, "Not dividable");
-        std::vector<size_t> new_shape = shape;
-        new_shape[0] /= n_split;
-        new_shape.insert(new_shape.begin(), n_split);
-        return new_shape;
-    }
-
-    vector<Tensor> split_dim1(const core::Context& ctx, const Tensor& t, size_t n_split) {
-        BM_ASSERT_EQ(t.size(1) % n_split, 0, "Not divisible");
-        size_t part_size = t.size(1) / n_split;
-        vector<Tensor> results(n_split);
-        for (size_t i = 0; i < n_split; ++i) {
-            results[i] = functions::slice_last_dim(ctx, t, i * part_size, part_size);
-        }
-        return results;
-    }
-
     vector<Int4GPTQ*> split(const core::Context& ctx, size_t n_split, bool by_out) {
         BM_ASSERT(loaded, "");
         BM_ASSERT(new_kernel && use_exllama, "");
@@ -694,10 +707,10 @@ public:
             for (size_t i = 0; i < n_split; ++i) {
                 results[i] = new Int4GPTQ(
                     ctx, dim_in, dim_out / n_split, "", quant, dtype, parallel, dist_layout, act_order, group_size, sym);
-                results[i]->qweight = v_weights[i];
+                results[i]->qweight = ctx.copy(v_weights[i]);
                 results[i]->qzeros = v_zeros[i];
                 results[i]->scales = v_scales[i];
-                results[i]->qweight.set_name(qweight.name());
+                results[i]->qweight.set_name(logger::str_cat(qweight.name(), "_part", i));
             }
         } else {
             auto v_weights = split_dim1(ctx, qweight, n_split);
@@ -1158,7 +1171,6 @@ public:
     functions::Gemm gemm;
 
     bool scale_weights;
-    bool parallel;
     DistLayout dist_layout;
     int dev;
     bool fuse_qkv;
@@ -1177,7 +1189,7 @@ public:
         bool act_order,
         int group_size,
         bool sym)
-        : Linear::impl(dim_in, dim_out, act_fn_type, false, quant, dtype),
+        : Linear::impl(dim_in, dim_out, act_fn_type, false, quant, dtype, parallel),
           group_size(group_size),
           act_order(act_order),
           sym(sym),
@@ -1185,7 +1197,6 @@ public:
           qzeros(ctx.parameter({ dim_in / group_size, dim_out / pack_factor }, DataType::kInt32)),
           scales(ctx.parameter({ dim_in / group_size, dim_out }, dtype)),
           gemm(ctx, dtype, false, false),
-          parallel(parallel),
           dist_layout(dist_layout),
           dev(ctx.active_device_idx()) {
         BM_ASSERT_EQ(quant, 8, "Wrong quant type");
@@ -1207,6 +1218,7 @@ public:
     }
 
     static GPTQMarlin* fuse(const core::Context& ctx, GPTQMarlin& a, GPTQMarlin& b) {
+        if (a.loaded || b.loaded) return nullptr;
         BM_ASSERT(!a.loaded, "");
         auto dim_out = a.dim_out + b.dim_out;
         GPTQMarlin* ret = new GPTQMarlin(
@@ -1250,6 +1262,10 @@ public:
 
     core::Tensor& get_weight() { return qweight; }
     core::Tensor* get_weight_scale() { return &scales; }
+    core::Tensor get_dequant_weight(const core::Context& ctx) {
+        // TODO: Verify
+        return dequant_weight_by_mul_diag(ctx, qweight.size(0) * 16);
+    }
 
     core::Tensor forward(
         const core::Context& ctx,
@@ -1346,7 +1362,6 @@ public:
     functions::Gemm gemm;
 
     bool scale_weights;
-    bool parallel;
     DistLayout dist_layout;
     int dev;
 
@@ -1360,13 +1375,12 @@ public:
         bool parallel,
         DistLayout dist_layout,
         int group_size)
-        : Linear::impl(dim_in, dim_out, act_fn_type, false, quant, dtype),
+        : Linear::impl(dim_in, dim_out, act_fn_type, false, quant, dtype, parallel),
           group_size(group_size),
           qweight(ctx.parameter({ dim_in, dim_out / pack_factor }, DataType::kInt32)),
           qzeros(ctx.parameter({ dim_in / group_size, dim_out / pack_factor }, DataType::kInt32)),
           scales(ctx.parameter({ dim_in / group_size, dim_out }, dtype)),
           gemm(ctx, dtype, false, false),
-          parallel(parallel),
           dist_layout(dist_layout),
           dev(ctx.active_device_idx()) {
         BM_ASSERT_EQ(quant, 6, "Wrong quant type");
@@ -1495,7 +1509,6 @@ public:
     core::Tensor weight_scale;
     core::Tensor bias;
     std::string act_fn_type;
-    bool parallel;
     DistLayout dist_layout;
 
     Fp8Linear(
@@ -1507,10 +1520,9 @@ public:
         core::DataType dtype,
         bool parallel,
         DistLayout dist_layout)
-        : Linear::impl(dim_in, dim_out, act_fn_type, false, quant, dtype),
+        : Linear::impl(dim_in, dim_out, act_fn_type, false, quant, dtype, parallel),
           weight(ctx.parameter({ dim_out, dim_in }, core::DataType::kInt8)),
           weight_scale(ctx.parameter({ 1 }, core::DataType::kFloat)),
-          parallel(parallel),
           dist_layout(transpose_layout(dist_layout)) {
     }
     virtual ~Fp8Linear() = default;
@@ -1576,6 +1588,149 @@ public:
     }
 };
 
+class Linear::impl::Fp8Block : public Linear::impl {
+public:
+    core::Tensor weight; // (dim_out, dim_in)
+    core::Tensor weight_scale;
+    core::Tensor bias;
+    DistLayout dist_layout;
+
+    Fp8Block(
+        const core::Context& ctx,
+        uint32_t dim_in,
+        uint32_t dim_out,
+        std::string act_fn_type,
+        int quant,
+        core::DataType dtype,
+        bool parallel,
+        DistLayout dist_layout)
+        : Linear::impl(dim_in, dim_out, act_fn_type, false, quant, dtype, parallel),
+          weight(ctx.parameter({ dim_out, dim_in }, core::DataType::kInt8)),
+          weight_scale(ctx.parameter({ round_up(dim_out, 128) / 128, round_up(dim_in, 128) / 128 }, core::DataType::kFloat)),
+          dist_layout(transpose_layout(dist_layout)) {
+    }
+    virtual ~Fp8Block() = default;
+
+    void set_has_bias(bool b) override {
+        has_bias = b;
+        if (b) throw std::runtime_error("Fp8Block doesn't support bias");
+    }
+
+    void scale_output(float scale) {
+        // throw std::logic_error("Not supported");
+    }
+    void set_output_type(core::DataType dtype) {
+        // throw std::logic_error("Not supported");
+    }
+
+    core::Tensor& get_weight() override { return weight; }
+    core::Tensor* get_weight_scale() override { return &weight_scale; }
+    core::Tensor get_dequant_weight(const core::Context& ctx) override {
+        auto ret = fp8::dequant_fp8_block_weight(ctx, weight, weight_scale, dtype);
+//        if (ctx.is_layer(0)) {
+//            std::cout << "weight_scale: " << weight_scale << endl;
+//        }
+//        functions::check_numeric(ctx, ret);
+        return ret;
+    };
+
+    static Fp8Block* fuse(const core::Context& ctx, Fp8Block& a, Fp8Block& b) {
+        uint32_t dim_out = a.dim_out + b.dim_out;
+        Fp8Block* ret = new Fp8Block(
+            ctx, a.dim_in, dim_out, a.act_fn_type, a.quant, a.dtype, a.parallel, a.dist_layout);
+        ret->weight = concat2_dim0(ctx, a.weight, b.weight);
+        ret->weight_scale = concat2_dim0(ctx, a.weight_scale, b.weight_scale);
+        return ret;
+    }
+
+    vector<Fp8Block*> split(const core::Context& ctx, size_t n_split, bool by_out) {
+        BM_ASSERT(!has_bias, "");
+        std::vector<Fp8Block*> results(n_split);
+
+        if (by_out) {
+            BM_ASSERT_EQ(weight_scale.size(0) % n_split, 0, "Not divisible");
+            auto v_weights = weight.view(split_shape_dim0(weight.shape(), n_split)).chunk();
+            auto v_scales = weight_scale.view(split_shape_dim0(weight_scale.shape(), n_split)).chunk();
+
+            for (size_t i = 0; i < n_split; ++i) {
+                results[i] = new Fp8Block(
+                    ctx, dim_in, dim_out / n_split, act_fn_type, quant, dtype, parallel, dist_layout);
+                results[i]->weight = ctx.copy(v_weights[i]);
+                results[i]->weight.set_name(logger::str_cat(weight.name(), "_part", i));
+                results[i]->weight_scale = ctx.copy(v_scales[i]);
+            }
+        } else {
+            BM_ASSERT_EQ(weight.size(1) % (128 * n_split), 0, "Not divisible");
+            auto v_weights = split_dim1(ctx, weight, n_split);
+            auto v_scales = split_dim1(ctx, weight_scale, n_split);
+
+            for (size_t i = 0; i < n_split; ++i) {
+                results[i] = new Fp8Block(
+                    ctx, dim_in / n_split, dim_out, act_fn_type, quant, dtype, parallel, dist_layout);
+                results[i]->weight = v_weights[i];
+                results[i]->weight.set_name(logger::str_cat(weight.name(), "_part", i));
+                results[i]->weight_scale = v_scales[i];
+            }
+        }
+        return results;
+    }
+
+    void load_state_dict(
+        const core::Context& ctx,
+        const std::map<std::string, const core::Tensor>& state_dict,
+        const std::string& prefix,
+        bool allow_missing) override {
+        this->prefix = prefix;
+        ctx.load_parameter(&weight, prefix + ".weight", state_dict, parallel, dist_layout);
+        ctx.load_parameter(&weight_scale, prefix + ".weight_scale_inv", state_dict, parallel, dist_layout);
+    }
+
+    core::Tensor forward(
+        const core::Context& ctx,
+        const core::Tensor& input,
+        const std::string& output_name,
+        bool quant_back,
+        Tensor* output
+    ) override {
+        int ev_level = ctx.rank() == 0 && ctx.current_layer() == 300 ? 0 : 2;
+        size_t m = input.size(0);
+        size_t k = input.size(1);
+        size_t n = weight.size(0);
+        string ev_name = logger::str_cat("[M=", m, "] FP8Block::forward ", prefix);
+        core::EventScope ev_scope(ctx, ev_name, ev_level);
+
+        auto& a_quant = input.quant_scale;
+        if (!a_quant) {
+            const_cast<Tensor&>(input).quant_scale = std::make_shared<core::Tensor>();
+            ctx.recordEvent("dynamic_scaled_quant", ev_level);
+            // FIXME: fuse
+            *a_quant = nn::fp8::per_token_cast_to_fp8(ctx, input);
+        } else {
+            BM_ASSERT_EQ(a_quant->dtype(), core::DataType::kFP8_E4M3, "Wrong fp8 dtype");
+        }
+
+        ctx.recordEvent("gemm_fp8_block", ev_level);
+        Tensor ret = ctx.tensor({m, n}, dtype);
+        int ret_code = deep_gemm_fp8_block_h20_group(
+            a_quant->data(),
+            a_quant->quant_scale->data(),
+            weight.data(),
+            weight_scale.data(),
+            ret.data(),
+            nullptr,
+            ctx.current_stream()->ptr,
+            m, n, k,
+            64,
+            1
+        );
+        if (ret_code == -1) {
+            throw std::runtime_error(logger::str_cat("Unsupported shape N=", weight.size(0), ", K=", weight.size(1)));
+        }
+
+        return activate(ctx, ret);
+    }
+};
+
 Linear::Linear(
     const core::Context& ctx,
     int dim_in,
@@ -1591,6 +1746,9 @@ Linear::Linear(
     int quant = static_cast<int>(quant_config.quant_type);
     if (quant_config.quant_type == model::QuantType::FP8) {
         pimpl.reset(new impl::Fp8Linear(
+            ctx, dim_in, dim_out, act_fn_type, quant, dtype, parallel, dist_layout));
+    } else if (quant_config.quant_type == model::QuantType::FP8_Block) {
+        pimpl.reset(new impl::Fp8Block(
             ctx, dim_in, dim_out, act_fn_type, quant, dtype, parallel, dist_layout));
     } else if (quant_config.quant_type == model::QuantType::AWQ) {
         auto tmp = new impl::AWQ(
@@ -1668,7 +1826,9 @@ core::Tensor Linear::forward(
     const core::Context& ctx, const core::Tensor& input, bool quant_back, Tensor* output) {
     size_t K = input.size(-1);
     size_t M = input.numel() / K;
-    size_t N = DistLayout::COLUMNAR == pimpl->dist_layout ? pimpl->dim_out / ctx.world_size() : pimpl->dim_out;
+    size_t N = (pimpl->parallel && DistLayout::COLUMNAR == pimpl->dist_layout)
+        ? pimpl->dim_out / ctx.world_size()
+        : pimpl->dim_out;
     auto name1 = "Linear(" + name + ")[M=";
     auto ev_name = logger::str_cat(name1, M, ",N=", N, ",K=", K, "]");
     size_t flops = 2UL * K * M * N;
@@ -1729,6 +1889,7 @@ Linear* Linear::fuse(const core::Context& ctx, Linear& q, Linear& k) {
     auto gptq_ptr = dynamic_cast<impl::Int4GPTQ*>(q.pimpl.get());
     auto awq_ptr = dynamic_cast<impl::AWQ*>(q.pimpl.get());
     auto gptq2_ptr = dynamic_cast<impl::GPTQMarlin*>(q.pimpl.get());
+    auto fp8block = dynamic_cast<impl::Fp8Block*>(q.pimpl.get());
     if (awq_ptr) {
         auto k_ptr = dynamic_cast<impl::AWQ*>(k.pimpl.get());
         auto fused_ptr = impl::AWQ::fuse(ctx, *awq_ptr, *k_ptr);
@@ -1744,12 +1905,19 @@ Linear* Linear::fuse(const core::Context& ctx, Linear& q, Linear& k) {
         auto k_ptr = dynamic_cast<impl::GPTQMarlin*>(k.pimpl.get());
         auto a = impl::GPTQMarlin::fuse(ctx, *gptq2_ptr, *k_ptr);
         ret->pimpl = std::unique_ptr<impl>(a);
+    } else if (fp8block) {
+        auto k_ptr = dynamic_cast<impl::Fp8Block*>(k.pimpl.get());
+        auto a = impl::Fp8Block::fuse(ctx, *fp8block, *k_ptr);
+        ret->pimpl = std::unique_ptr<impl>(a);
     } else if (q.pimpl->quant == 0) {
         auto q_ptr = dynamic_cast<impl::NormalLinear*>(q.pimpl.get());
         auto k_ptr = dynamic_cast<impl::NormalLinear*>(k.pimpl.get());
         auto fused_ptr = impl::NormalLinear::fuse(ctx, *q_ptr, *k_ptr);
         ret->pimpl = std::unique_ptr<impl>(fused_ptr);
     } else {
+        return nullptr;
+    }
+    if (!ret->pimpl) {
         return nullptr;
     }
     if (q.name == "w_in")
@@ -1822,6 +1990,16 @@ std::vector<Linear*> Linear::split(const core::Context& ctx, size_t n_split, boo
     auto ptr = dynamic_cast<impl::Int4GPTQ*>(pimpl.get());
     if (ptr) {
         auto impls = ptr->split(ctx, n_split, dim_out);
+        for (auto a : impls) {
+            Linear* linear = new Linear();
+            linear->pimpl = std::unique_ptr<impl>(a);
+            linear->name = name;
+            results.push_back(linear);
+        }
+    }
+    auto fp8b_ptr = dynamic_cast<impl::Fp8Block*>(pimpl.get());
+    if (fp8b_ptr) {
+        auto impls = fp8b_ptr->split(ctx, n_split, dim_out);
         for (auto a : impls) {
             Linear* linear = new Linear();
             linear->pimpl = std::unique_ptr<impl>(a);
