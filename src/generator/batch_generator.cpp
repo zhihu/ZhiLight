@@ -1311,7 +1311,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
                 int nbytes = 0;
                 searcher->engine_->broadcast_data(&data, &nbytes);
                 vector<char> new_buffer(data, data + nbytes);
-                deserialize_from_buffer(buffer, new_tasks);
+                deserialize_from_buffer(new_buffer, new_tasks);
                 std::cout << "broadcast recv!" << std::endl;
             }
             std::cout << "New tasks: " << new_tasks.size() << "IDs: " << std::endl;
