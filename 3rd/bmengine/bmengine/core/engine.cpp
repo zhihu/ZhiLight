@@ -37,7 +37,7 @@ static std::string format_nccl_comm_id(const ncclUniqueId& uniqueID) {
         if (uniqueID.internal[i] == 0) {
             continue;
         }
-        unsigned char* data = reinterpret_cast<unsigned char *>(uniqueID.internal);
+        const unsigned char* data = reinterpret_cast<unsigned char *>(uniqueID.internal);
         for (int j = 0; j <= i; j++) {
             oss << std::hex << std::setw(2) << std::setfill('0') << data[j];
         }
