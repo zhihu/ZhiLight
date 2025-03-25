@@ -14,7 +14,6 @@
 #include <thread>
 #include <cublas_v2.h>
 #include <curand.h>
-#include <cstdio>
 
 #include "private/guard.h"
 #include "private/engine.h"

@@ -422,7 +422,7 @@ class SearcherImplV1 {
     DynBatchConfig config;
     BatchGenerator* searcher;
 
-    vector<SearchTask> tasks;  // batch tasks
+    vector<SearchTask> tasks;
     TopKWrapper topk_all;
     vector<unique_ptr<TopKWrapper>> topk;
     vector<BeamSearchResultManager> result_mgr;
@@ -432,7 +432,7 @@ class SearcherImplV1 {
 
     vector<int> steps;
     vector<vector<BeamHypothesis>> hypotheses;
-    vector<vector<BeamBufferInfo>> next_tokens; // 多机共享
+    vector<vector<BeamBufferInfo>> next_tokens;
     vector<SearchTask> new_tasks;
     len_t beam_size;
     len_t max_batch_active { 0 };
@@ -452,7 +452,6 @@ class SearcherImplV1 {
 
     vector<shared_ptr<PrefixCache>> prefix_cache;
 
-    // 这里怎么又有一处threads ???
     std::vector<TaskThreadPool*> device_threads;
 
     vector<vector<SwapBuf>> swapped_buffers;
@@ -530,7 +529,6 @@ public:
             if (debug_level > 1)
                 std::cout << "LWP " << _get_tid() << " " << name << "\n";
             pthread_setname_np(pthread_self(), name.c_str());
-            // others model contexts
             peer_ctx[i] = new ModelContext(
                 ModelContext::create(*searcher->engine_, *searcher->par_models_[i], this->config, i, true));
         }, true, false);
@@ -762,7 +760,7 @@ public:
 
         tasks[b] = task;
         // std::cout << "task: b=" << b  << ", random=" << task->is_random() << ", seed=" << task->seed << "\n";
-        if (!topk[b]) // 按理说这里应该一直是null才合理, 不然应该delete
+        if (!topk[b])
             topk[b].reset(new TopKWrapper(ctx));
         topk[b]->set_seed(task->diverse || task->is_random(), task->seed);
         result_mgr[b].reset(std::max(task->beam_size, task->num_results));
@@ -868,14 +866,14 @@ public:
 
 template <typename TokenT, typename ResultT>
 void SearcherImplV1<TokenT, ResultT>::resize_rag_buf() {
-    total_len_buf = sum_len_buf(); // TODO: 调整了beamBuffer之后调整kvcache
+    total_len_buf = sum_len_buf();
     // std::cout << "max_batch_active=" << max_batch_active << ", total_len_buf=" << total_len_buf << ", max_buf_token_num=" << max_buf_token_num << "\n";
     // resize buf if necessary to hold next step tokens
     for (len_t b = 0; b < max_batch_active; ++b) {
         if (bm[b].unused_buffer_pos.size() < next_tokens[b].size()) {
             len_t ext_len = round_up_len(next_tokens[b].size());
             total_len_buf += ext_len;
-            if (total_len_buf > max_buf_token_num && !pre_alloc) { // 多机这块不是很好实现，TODO
+            if (total_len_buf > max_buf_token_num && !pre_alloc) {
                 len_t e = max_batch_active - 1;
                 if (b < e) {
                     // std::cout << "Swap out task " << e << "\n";
@@ -958,24 +956,23 @@ void SearcherImplV1<int, int>::fill_encode_input(vector<SearchTask>& new_tasks) 
         BM_ASSERT(new_tasks.empty(), "");
         // BM_ASSERT_EQ(chunking_b, max_batch_active, "");
         // Fake chunking task as new task
-        new_tasks.push_back(tasks[chunking_b]); // chunking时，只有一条处于chunking的prefill请求
+        new_tasks.push_back(tasks[chunking_b]);
     }
 
-    vector<int> v_batch(new_tasks.size()); // 每个请求在batch中的第几个位置, batch_indices
-    vector<int> input_lens(new_tasks.size()); // 每个请求这次处理的tokens数，不一定是全部，比如prefix_cache和chunked时, 这里乘beam_size吗？？？
-    vector<int> full_input_lens(new_tasks.size()); // flash attention need real length, 已处理的tokens+当前要处理的tokens
+    vector<int> v_batch(new_tasks.size());
+    vector<int> input_lens(new_tasks.size());
+    vector<int> full_input_lens(new_tasks.size());
     vector<int> buf_lens(new_tasks.size());
     // fill matrices of input tokens
-    RagVector<int32_t> h_token;   // 要处理的tokens
-    RagVector<int32_t> h_batch;   // batch_indices, batch in buffer
-    RagVector<int32_t> h_placement; // beambuffermanager中的位置, pos in buffer
-    RagVector<int32_t> h_position;  // seq len pos
-    RagVector<int8_t> h_mask;       // beambuffermanager mask
+    RagVector<int32_t> h_token;
+    RagVector<int32_t> h_batch;
+    RagVector<int32_t> h_placement;
+    RagVector<int32_t> h_position;
+    RagVector<int8_t> h_mask;
 
     for (size_t i = 0; i < new_tasks.size(); ++i) {
         auto& task = new_tasks[i];
-        // 这里是截止当前的总长度
-        auto& tokens = task->input_tokens; // 每次迭代，这里是所有tokens，还是新的tokens？beam情况怎么算？还是只有prompt？？
+        auto& tokens = task->input_tokens;
         len_t b;
         if (chunking) {
             b = chunking_b;
@@ -983,7 +980,6 @@ void SearcherImplV1<int, int>::fill_encode_input(vector<SearchTask>& new_tasks) 
             b = assign_free_slot(task);
             BM_ASSERT(b != len_t(-1), "No free slot");
             set_debug_batch(i, b);
-            // B3: resize kv buffer
             init_slot(b, task);  // update max_batch_active
         }
         v_batch[i] = b;
@@ -1000,7 +996,7 @@ void SearcherImplV1<int, int>::fill_encode_input(vector<SearchTask>& new_tasks) 
             // task->cached_len_ = cached_len;
             // std::cout << "cached_len: " << cached_len << endl;
         }
-        len_t token_num = tokens.size() - 1;  // Reserve last token for search, 如果是chunking中,这里始终获得的是所有的tokens
+        len_t token_num = tokens.size() - 1;  // Reserve last token for search
         BM_ASSERT_LT(cached_len, token_num, "");
         len_t encode_len = token_num - cached_len;
 
@@ -1021,10 +1017,10 @@ void SearcherImplV1<int, int>::fill_encode_input(vector<SearchTask>& new_tasks) 
             len_t beam_size1 = calc_max_beam_size(tasks, 0);
             BM_ASSERT(beam_size1 > 0, "");
             BM_ASSERT(max_batch_active > 0, "");
-            len_t chunk_size_adj = chunk_size - chunking_b * beam_size1; // 减去chunking_b * beam_size1个decode的tokens???
+            len_t chunk_size_adj = chunk_size - chunking_b * beam_size1;
             if (encode_len <= chunk_size_adj) {
                 // std::cout << "Done chunking b=" << b << ", len=" << (chunked + encode_len) << endl;
-                max_batch_active = chunking_b + 1; // 怎么感觉这里没有啥必然联系???
+                max_batch_active = chunking_b + 1;
                 chunking_b = -1; // end chunk_prefill
                 chunked = 0;
                 chunking = false;
@@ -1036,10 +1032,10 @@ void SearcherImplV1<int, int>::fill_encode_input(vector<SearchTask>& new_tasks) 
             }
         }
 
-        input_lens[i] = encode_len;      // 本次要计算的长度
-        full_input_lens[i] = token_num;  // 输入总长度
+        input_lens[i] = encode_len;
+        full_input_lens[i] = token_num;
         if (chunking)
-            full_input_lens[i] = chunked; // 当前总长度
+            full_input_lens[i] = chunked;
         len_t len1 = round_up_len(encode_len, 32);
         buf_lens[i] = (len1 <= len_buf / 2 || (len1 + 256) <= len_buf) ? len1 : len_buf;
         buf_lens[i] = config.rag_buffer ? bm[b].len_buf : buf_lens[i];
@@ -1068,7 +1064,7 @@ void SearcherImplV1<int, int>::fill_encode_input(vector<SearchTask>& new_tasks) 
         Tensor e_placement = rag_tensor(ctx, h_placement);
         Tensor e_mask = rag_tensor(ctx, h_mask);
         Tensor e_position = rag_tensor(ctx, h_position);
-        if (!new_tasks[0]->position_ids.empty()) { // 这里干什么用？？？
+        if (!new_tasks[0]->position_ids.empty()) {
             const len_t num_ids = new_tasks[0]->position_ids.size();
             BM_ASSERT_EQ(new_tasks.size(), 1, "multi-task is not supported");
             BM_ASSERT_EQ(num_ids % new_tasks[0]->input_length(), 0, "position_ids size mismatch");
@@ -1266,22 +1262,19 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
 
     while (true) {
         if (in_chunking()) {
-            max_batch_active = chunking_b + 1; // chunked_prefix仅有一条且是batch最后一条
+            max_batch_active = chunking_b + 1;
         }
         if (config.rag_buffer) {
             auto dev = ctx.with_device(0);
-            // B1: 这里需要每张卡都做
-            // swap_out/swap_in kv_cache & resize token buffer & kv_buffer
-            // TODO: 这里可能更改max_batch_active和swap_count
-            resize_rag_buf(); // 仅针对decode tokens分配kv cache，resize kv_cache buf 按需copy旧的kv_cache, 按需swap out/in
-            active_count = max_batch_active; // 内部可能改，所以这里重置一下
+            resize_rag_buf();
+            active_count = max_batch_active;
         }
         searcher->active_size_ = active_count;
-        if (active_count == 0 && searcher->queue_.size() == 0) { // 这里slave需要跳过
+        if (searcher->engine_->node_rank() == 0 && active_count == 0 && searcher->queue_.size() == 0) {
             searcher->done_cond_.notify_all();
         }
         int max_total_token;
-        if (swap_count == 0 && active_count < max_batch && !in_chunking()) { // 取一条新的prefill
+        if (swap_count == 0 && active_count < max_batch && !in_chunking()) {
             int free_token_num = int(max_buf_token_num - total_len_buf - 2);
             if (dual_stream)
                 free_token_num -= config.max_total_token - 5000;
@@ -1303,8 +1296,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
             searcher->engine_->broadcast_data(new_tasks);
         }
 
-        if (searcher->stopping_) { // stop & cancel 都需要通知slave, 这里可以先不管
-            // B2: 需要通知结束
+        if (searcher->stopping_) {
             break;
         } else if (max_batch_active == 0) {
             BM_ASSERT(!new_tasks.empty(), "pop_multi() return 0 tasks.");
@@ -1314,7 +1306,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
 
         // resize fields
         if (!config.rag_buffer) {
-            len_t new_len_buf = calc_new_len_buf(max_beam_size); // max_beam_size可能也需要broadcast
+            len_t new_len_buf = calc_new_len_buf(max_beam_size);
             this->resize(max_beam_size, new_len_buf);
         }
         num_new_tasks = new_tasks.size();
@@ -1323,7 +1315,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
                 << ", active_count=" << active_count << endl;
         }
         bool feed_input_embedding = !new_tasks.empty() && !new_tasks[0]->input_embeddings.empty();
-        if (feed_input_embedding && tasks[0]) { // 为什么要这么做？？？
+        if (feed_input_embedding && tasks[0]) {
             BM_ASSERT(searcher->engine_->nnodes() == 1, "feed_input_embedding only support single node, now");
             int b = assign_free_slot(tasks[0]);
             if (debug_level) std::cout << "Move task 0 to " << b << endl;
@@ -1342,7 +1334,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
 
         /** -------------------------- Fill Next Search --------------------------- **/
         if (feed_input_embedding) max_batch_active = 1;
-        if (in_chunking()) max_batch_active = chunking_b; // chunking之前的所有batch请求都是decode
+        if (in_chunking()) max_batch_active = chunking_b;
         Matrix2D<int32_t> h_placement(max_batch_active, max_beam_size, -1); // pos in buffer
         Matrix2D<float> h_prob_prev(max_batch_active, max_beam_size, -50000);
         fill_search_tokens(h_placement, h_prob_prev);
@@ -1354,7 +1346,6 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
             save_prompt_cache();
         }
 
-        // 没有decode输出，只能是chunked prefill的一部分
         if (logits_all.numel() == 0) {
             BM_ASSERT(in_chunking(), "");
             max_batch_active = 1;
@@ -1362,7 +1353,6 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
         }
 
         size_t logits_dim = searcher->model_->vocab_size;
-        // chunked prefill仅有最后一个，在这之前剔除了这一个，修改了max_batch_active
         logits_all = logits_all.view({max_batch_active, max_beam_size, logits_dim });
         if (hidden.numel())
             hidden = hidden.view({max_batch_active, max_beam_size, hidden.size(-1) });
@@ -1371,7 +1361,6 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
         pick_top_k(logits_all, hidden, h_placement, h_prob_prev);
         // ctx.release_device();
 
-        // 清理分数肯定不达标的句子
         for (len_t b = 0; b < max_batch_active; ++b) {
             if (!next_tokens[b].empty()) {
                 float best_score = next_tokens[b][0].log_prob / float(steps[b] + 1);
@@ -1380,7 +1369,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
                 }
                 if (!result_mgr[b].accept_score(best_score)) {
                     // stop search, because current result's score is too small
-                    next_tokens[b].clear(); // 这里可能产生空洞batch，下边会重排序
+                    next_tokens[b].clear();
                 }
             }
             steps[b]++;
@@ -1388,12 +1377,10 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
                 tasks[b]->first_token_delay_ms = (logger::get_time_us() - tasks[b]->begin_ts) / 1000;
         }
 
-        // TODO1: broadcast max_batch_active & tasks & next_tokens & chunking_b
-
         /** ------------------------------ Fill result ------------------------------- **/
         active_count = 0;
         len_t max_batch_active1 = max_batch_active;
-        max_batch_active = 0; // 重新计算这个值
+        max_batch_active = 0;
         for (len_t b = 0; b < max_batch_active1; ++b) {
             if (tasks[b] && next_tokens[b].empty()) {
                 if (result_mgr[b].get_current_results() == 0) {
@@ -1422,7 +1409,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
             if (tasks[b]) {
                 active_count++;
                 max_batch_active = b + 1; 
-            } else if (config.rag_buffer) { // 这里释放了空洞部分
+            } else if (config.rag_buffer) {
                 erase_task(b);
                 b--;
                 max_batch_active1--;
@@ -1659,7 +1646,7 @@ void SearcherImplV1<int, int>::pick_top_k(
             }
         }
 
-        bm[b].release_buffer(&h_placement(b, 0), hyp_num); // 这里release上一轮输入的引用，下一轮输入的引用已经inc了
+        bm[b].release_buffer(&h_placement(b, 0), hyp_num);
     }
 }
 
