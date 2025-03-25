@@ -28,6 +28,19 @@ static inline int get_int_env(const char* name, int def_val = 0) {
     return env_str != nullptr ? std::atoi(env_str) : def_val;
 }
 
+static std::string format_nccl_comm_id(const ncclUniqueId& uniqueID) {
+    istringstream iss;
+    for (int i = NCCL_UNIQUE_ID_BYTES - 1; i >= 0; i--) {
+        if (uniqueID.internal[i] == 0) {
+            continue;
+        }
+        for (int j = 0; j <= i; j++) {
+            iss << std::hex << std::setw(2) << std::setfill('0') << (int)uniqueID.internal[j];
+        }
+    }
+    return iss.str();
+}
+
 DeviceHandles::DeviceHandles(int dev_id, ncclUniqueId uniqueID, int tp_rank, int tp_ranks, int pp_rank, int pp_ranks)
     : dev_id(dev_id), tp_rank(tp_rank), tp_ranks(tp_ranks), pp_rank(pp_rank), pp_ranks(pp_ranks) {
     DeviceGuard guard(dev_id);
@@ -86,13 +99,7 @@ EngineImpl::EngineImpl(const std::vector<DeviceConfiguration>& dev_cfgs, const D
         "at least one cpu-core per device required.");
     int pp_ranks = total_dev_count / tp_ranks;
     world_size_ = tp_ranks;
-    if (tp_ranks > 1 || pp_ranks > 1) {
-        int nccl_version;
-        ncclGetVersion(&nccl_version);
-        std::cout << "********* world_size=" << world_size_ << ", nccl_version=" << nccl_version << " *********\n";
-    }
     
-    hc = new c10d::HostCommunicator(dist_cfg.dist_init_addr, dist_cfg.nnodes, dist_cfg.node_rank);
 
     char* debug_env = std::getenv("BM_DEBUG_LEVEL");
     if (debug_env != nullptr) {
@@ -106,21 +113,24 @@ EngineImpl::EngineImpl(const std::vector<DeviceConfiguration>& dev_cfgs, const D
         device_threads.push_back(new TaskThreadPool(1, i));
     }
 
-    uniqueIDs.resize(pp_ranks);
-    char *data = reinterpret_cast<char *>(uniqueIDs.data());
-    int nbytes = sizeof(ncclUniqueId) * pp_ranks;
     // broadcast
-    if (dist_cfg.node_rank == 0) {
+    hc = new c10d::HostCommunicator(dist_cfg.dist_init_addr, dist_cfg.nnodes, dist_cfg.node_rank);
+    if (tp_ranks > 1 || pp_ranks > 1) {
+        int nccl_version;
+        ncclGetVersion(&nccl_version);
+        std::cout << "********* world_size=" << world_size_ << ", nccl_version=" << nccl_version << " *********\n";
+
+        uniqueIDs.resize(pp_ranks);
+        char *data = reinterpret_cast<char *>(uniqueIDs.data());
+        int nbytes = sizeof(ncclUniqueId) * pp_ranks;
+
         for (size_t i = 0; i < uniqueIDs.size(); i++) {
             BM_NCCL_ASSERT(ncclGetUniqueId(&uniqueIDs[i]));
+            std::cout << "NCCL comm uniqueID: " << format_nccl_comm_id(uniqueIDs[i]) << std::endl;
         }
+
+        hc->broadcast_data(data, nbytes);
     }
-    printf("UniqueID: ");
-    for (int i = 0; i < 128; i++) {
-        printf("%02x", (unsigned char)(data[i]));
-    }
-    printf("\n");
-    hc->broadcast_data(data, nbytes);
 
     ncclGroupStart();
     local_ranks_ = 0;
