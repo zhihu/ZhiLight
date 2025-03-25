@@ -32,7 +32,6 @@ static inline int get_int_env(const char* name, int def_val = 0) {
 
 static std::string format_nccl_comm_id(const ncclUniqueId& uniqueID) {
     std::ostringstream oss;
-    oss.clear();
     for (int i = NCCL_UNIQUE_ID_BYTES - 1; i >= 0; i--) {
         if (uniqueID.internal[i] == 0) {
             continue;
