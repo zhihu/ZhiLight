@@ -33,7 +33,9 @@ public:
     class NormalImpl;
     class Int8Impl;
     class MOEImpl;
+    class FusedMOE;
     class GPTQMOE;
+    class FP8BlockMOE;
 
     std::string name;
 
@@ -292,6 +294,9 @@ public:
         return exp_parallel ? (id * world_size + local_rank) : id;
     }
 
+    // Return:
+    //   group_idx_d local
+    //   reverse_idx_d
     tuple<Tensor, Tensor> get_idx_tensor(
         const core::Context& ctx,
         const vector<int>& routing_experts,         // (num_experts, top_k)
@@ -349,7 +354,7 @@ public:
         size_t total_seq_len) {
         if (total_seq_len > 1) {
             ctx.recordEvent("get_idx_tensor", 3);
-            auto [idx_d, rev_idx_d] =
+            auto [idx_d, rev_idx_d] = // idx_d is Local!
                 get_idx_tensor(ctx, routing_experts, group_token_idx, total_seq_len);
 
             Tensor h_reorder;
@@ -422,6 +427,7 @@ public:
             c10d::NCCLBroadcast(ctx, exp_weights, exp_weights, 0);
             c10d::NCCLBroadcast(ctx, exp_ids, exp_ids, 0);
         }
+        // (total_seq_len, top_k)
         return {exp_ids, exp_weights};
     }
 
@@ -531,7 +537,7 @@ public:
         routing_experts_t.to_buffer(routing_experts.data());
 
         vector<vector<int>> all_expert_tokens = dispatch_token(ctx, h,routing_experts, total_seq_len);
-        // permute input for all the experts
+        // permute input for LOCAL experts
         auto [h_reorder, rev_idx_d] = permute_input(ctx, h, routing_experts, all_expert_tokens, total_seq_len);
 
         auto [local_experts, expert_token_num] = filter_active_experts(all_expert_tokens);
@@ -543,7 +549,7 @@ public:
 
         vector<Tensor> expert_inputs = slice_dim0(h_reorder, expert_token_num, total_seq_len == 1);
         // Note: sparse MOE may consume too much memory
-        vector<Tensor> expert_ret(num_experts_may_share); // GLOBAL
+        vector<Tensor> expert_ret(num_experts_may_share); // GLOBAL (because routing_weights_t is global)
 
         {
             int d = ctx.debug();
@@ -606,38 +612,26 @@ public:
     }
 };
 
-class FeedForward::impl::GPTQMOE : public FeedForward::impl::MOEImpl {
+class FeedForward::impl::FusedMOE : public FeedForward::impl::MOEImpl {
+protected:
     std::shared_ptr<nn::Linear> all_in;
     std::shared_ptr<nn::Linear> all_gated;
     std::shared_ptr<nn::Linear> all_out;
     Tensor shared_ids;
     Tensor shared_weights;
-    bool fused_shared { false };
+    bool fused_shared{false};
 public:
-    GPTQMOE(
+    FusedMOE(
         const core::Context& ctx,
         model::ModelConfig cfg,
         model::QuantConfig quant_config,
         bool parallel,
         bool dyn_shared)
         : FeedForward::impl::MOEImpl(ctx, cfg, quant_config, parallel, dyn_shared) {
-        name = "GPTQMOE";
+        name = "FusedMOE";
     }
-    virtual ~GPTQMOE() = default;
 
-    void scale_gptq_scale(const core::Context& ctx, std::vector<nn::Linear*>& linears) {
-        if (routed_scaling_factor < 1)
-            return;
-        auto[qw0, qz0, scales0, sym0] = linears[0]->get_gptq_weights();
-        vector<float> factor_v(scales0.numel(), routed_scaling_factor);
-        Tensor factor = ctx.tensor_of(factor_v, scales0.shape());
-        factor = functions::typecast(ctx, factor, scales0.dtype());
-        functions::BinaryElementwiseOp add_op(ctx, functions::BinaryElementwiseOp::Mul);
-        for (Linear* linear : linears) {
-            auto[qw, qz, scales, sym] = linear->get_gptq_weights();
-            add_op.inplace(ctx, scales, factor);
-        }
-    }
+    virtual ~FusedMOE() = default;
 
     void post_load(const core::Context& ctx) {
         std::vector<nn::Linear*> all_gateds;
@@ -647,11 +641,6 @@ public:
             all_gateds.push_back(&experts[i]->w_gated);
             all_ins.push_back(&experts[i]->w_in);
             all_outs.push_back(&experts[i]->w_out);
-        }
-        int routed_scaling_to_weight = utils::get_int_env("ROUTED_SCALING_TO_WEIGHT", 0);
-        if (routed_scaling_to_weight > 0) {
-            scale_gptq_scale(ctx, all_gateds);
-            routed_scaling_factor = 1.;
         }
         // Fuse shared_experts
         int gptq_kernel_algo = utils::get_int_env("GPTQ_KERNEL_ALGO", 1);
@@ -697,6 +686,20 @@ public:
         for (auto p: shared_ins) delete p;
         for (auto p: shared_outs) delete p;
     }
+};
+
+class FeedForward::impl::GPTQMOE : public FeedForward::impl::FusedMOE {
+public:
+    GPTQMOE(
+        const core::Context& ctx,
+        model::ModelConfig cfg,
+        model::QuantConfig quant_config,
+        bool parallel,
+        bool dyn_shared)
+        : FeedForward::impl::FusedMOE(ctx, cfg, quant_config, parallel, dyn_shared) {
+        name = "GPTQMOE";
+    }
+    virtual ~GPTQMOE() = default;
 
     Tensor forward(const core::Context& ctx, const Tensor& input, bool quant_back) override {
         static int m_threshold = utils::get_int_env("GPTQ_MOE_M_THRES", 1);
@@ -749,6 +752,11 @@ FeedForward::FeedForward(
         if (dyn_shared) {
             BM_ASSERT(exp_parallel, "MOE_DYN_SHARED only uses in EP mode");
         }
+//        if (ctx.is_layer(cfg.first_k_dense_replace)) {
+//            std::cout << "fuse_moe=" << fuse_moe
+//                << ", exp_parallel=" << exp_parallel
+//                << ", dyn_shared=" << dyn_shared << endl;
+//        }
         auto ptr = (fuse_moe && gptq_kernel_algo == 1)
             ? new impl::GPTQMOE(ctx, cfg, quant_config, parallel, dyn_shared)
             : new impl::MOEImpl(ctx, cfg, quant_config, parallel);
