@@ -51,7 +51,7 @@ public:
             zmq::message_t msg;
             sock_->recv(&msg);
             if (nbytes == 0) {
-                std::istringstream iss(std::string(msg.data(), msg.data() + msg.size()), std::ios::binary);
+                std::istringstream iss(std::string(msg.data(), static_cast<char *>(msg.data()) + msg.size()), std::ios::binary);
                 boost::archive::binary_iarchive ia(iss);
                 ia >> obj_or_buf;
             } else {

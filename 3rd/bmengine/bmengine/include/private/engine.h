@@ -1,5 +1,6 @@
 #pragma once
 //#include "bmengine/core/engine.h"
+#include "bmengine/core/dtype.h"
 #include "bmengine/core/thread_pool.h"
 #include "bmengine/c10d/host_communicator.h"
 #include <mutex>
