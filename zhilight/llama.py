@@ -186,22 +186,20 @@ class LLaMA:
 
     def load_state_dict_pt(self, state_dict):
         import torch
-        def trans_type(dtype, p):
+        force_half = self._config.get("force_half", False)
+        def trans_type(dtype, name, p):
+            # Transform bfloat16 and fp8 to numpy supported types.
             if dtype == torch.bfloat16:
-                return p.view(torch.int16)
+                return p.half() if force_half else p.view(torch.int16)
             if dtype == torch.float8_e4m3fn:
                 return p.view(torch.int8)
-            if dtype == torch.float32 and p.ndim > 0:
-                return p.half()
+            # TODO: check which model need this cast
+            # if dtype == torch.float32 and p.ndim > 0:
+            #     return p.half()
             return p
 
-        if self._config.get("force_half", False):
-            for name, param in list(state_dict.items()):
-                if param.dtype == torch.bfloat16:
-                    state_dict[name] = param.half()
-
         new_state_dict = {
-            LLaMALoader._replace_name(name): np.atleast_1d(trans_type(param.dtype, param).cpu().numpy())
+            LLaMALoader._replace_name(name): np.atleast_1d(trans_type(param.dtype, name, param).cpu().numpy())
             for name, param in state_dict.items()
         }
         self._model.load_state_dict(new_state_dict)

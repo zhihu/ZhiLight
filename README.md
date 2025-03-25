@@ -1,4 +1,4 @@
-# ZhiLight大模型推理引擎
+# ZhiLight
 
 ✨ __ZhiLight__ ✨is a highly optimized LLM inference engine developed by Zhihu and ModelBest Inc. The "Zhi" in its name stands for **Z**hihu. ZhiLight can accelerate the inference of models like Llama and its variants, especially on PCIe-based GPUs. Compared to mainstream open-source inference engines, for example, vllm, it has significant performance advantages.
 
@@ -54,7 +54,6 @@ We conducted performance reviews on various mainstream NVIDIA GPUs with differen
 
 Test Description:
 - Test purpose is to demonstrate performance, applicable scenarios and limitations
-- Test dataset contains approximately 3.7k prompts
 - Test metrics include:
   - QPS: Queries Per Second
   - TTFT (Time To First Token): First token generation latency
@@ -62,13 +61,28 @@ Test Description:
 - Test environments include:
   - AD102 PCIe : Consumer-grade GPU for experimental research
   - A800: Data center GPU for production deployment
+  - H20: Data center GPU for production deployment
 - Test models include:
-  - Large-scale models: Qwen1.5-110B, Qwen2-72B, LLama-3.1-70B
+  - Large-scale models: DeepSeek-R1, Qwen1.5-110B, Qwen2-72B, LLama-3.1-70B
   - Medium-scale models: Qwen2.5-14B, Llama-3.1-8B, Minicpm-2B
 - Compared inference engines include:
   - vLLM
   - SGLang
   - ZhiLight
+
+### DeepSeek-R1 AWQ
+- **NVIDIA A800*8**
+
+| Inference Engine  | QPS     | TTFT Mean | TTFT P95  | TPOT Mean| TPOT P95|
+| :---:             |   :---: | :---:     | :----:    |    :---: |   :---: | 
+|    vLLM           | 0.08    | 1817.7    | 	2556.42 |	109.86    |  129.98  |
+|  **ZhiLight**       | **0.16**|**1590.96** | **2214.34**|**115.97**  |**139.99**|
+
+- **NVIDIA H20*8**
+
+| Inference Engine  | QPS     | TTFT Mean | TTFT P95  | TPOT Mean| TPOT P95|
+| :---:             |   :---: | :---:     | :----:    |    :---: |   :---: | 
+|  **ZhiLight**       | **0.23**|**2025.15** | **3278.09**|**128.28**  |**152.64**|
 
 ### MiniCPM-2B-sft-bf16
 

@@ -110,6 +110,7 @@ public:
     void print_memory_summary() const;
     void print_memory_detail() const;
     MemoryAllocator* get_allocator() const;  // use internally
+    MemoryAllocator* get_cache_allocator() const;  // use internally
 
     WithDevice with_device(int dev_id) const;
     WithDebug with_debug(int debug_level) const;
@@ -119,6 +120,7 @@ public:
 
     void enable_debug(int level) const;
     int debug() const;
+    bool checking_numerics() const;
     // Create and record cudaEvent_t to measure time and print timeline
     void recordEvent(const std::string& name, int ev_level = 2, float flops = 0) const;
     void set_event_level(int level) const;

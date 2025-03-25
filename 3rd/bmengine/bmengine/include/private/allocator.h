@@ -25,6 +25,7 @@ protected:
     void* end_ptr { nullptr };
 
     int print_alloc_time_step { 0 };
+    bool log_ { false };
     // for memory_move() when memory areas are overlapped
     size_t mem_reserve { 64 * 1024 * 1024 };
     void* move_buf;
@@ -60,6 +61,8 @@ public:
     size_t get_block_num() const { return mems.size(); }
 
     void set_allow_gc(bool allow) { allow_gc_ = allow; }
+    char* get_base_ptr() { return (char*) base_ptr; }
+    void set_log(bool b) { log_ = b; }
 };
 
 // for memory check

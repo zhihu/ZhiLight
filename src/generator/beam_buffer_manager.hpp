@@ -86,7 +86,7 @@ public:
 
     void trim(int len_input) {
         last_input_buf_pos = std::min(len_input - 1, last_input_buf_pos);
-	int allocated = buf_local.size() - unused_buffer_pos.size();
+	    int allocated = buf_local.size() - unused_buffer_pos.size();
         // unused pos: len_input, len_input+1 ... len_buf-1 in reverse order
         for (int i = 0; i < allocated - len_input; i++) {
 	    int pos = allocated - i - 1;
@@ -117,7 +117,7 @@ public:
         return place;
     }
 
-    int extend_buffer(int size = 32) {
+    int extend_buffer(int size) {
         for (int j = 0; j < size; j++) {
             unused_buffer_pos.push_front(len_buf + j);
         }
@@ -126,7 +126,7 @@ public:
         return len_buf;
     }
 
-    static int extend_buffer(std::vector<BeamBufferManager>& all_bm, int size = 32) {
+    static int extend_buffer(std::vector<BeamBufferManager>& all_bm, int size) {
         for (auto& bm : all_bm) {
             bm.extend_buffer(size);
         }
@@ -204,7 +204,7 @@ public:
 
     std::vector<TokenT> get_output_sequence(
         TokenT word_id, TokenT eos_id, int hypo_id) {
-        std::vector<int32_t> tmp_res;
+        std::vector<int> tmp_res;
         if (word_id != eos_id) {
             tmp_res.emplace_back(word_id);
         }

@@ -140,6 +140,7 @@ enum class QuantType {
     FP8 = 7,
     GPTQ_Marlin = 8,
     AWQ_Marlin = 9,
+    FP8_Block = 10,
 };
 struct QuantConfig {
     QuantType quant_type { QuantType::NoQuant };

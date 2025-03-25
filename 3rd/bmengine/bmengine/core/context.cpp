@@ -49,6 +49,7 @@ ContextImpl::ContextImpl(EngineImpl* engine, const std::vector<int>& devices, in
       aux_(aux) {
     tensor_cache.resize(8);
     debug = get_int_env("BM_DEBUG_LEVEL");
+    checking_numerics_ = get_int_env("CHECK_NUMERICS") == 1;
 
     for (int dev_id : devices) {
         // DeviceHandles* dev_handle = engine->get_device_handle(dev_id, aux);
@@ -348,6 +349,10 @@ MemoryAllocator* ContextImpl::get_allocator() const {
         allocator = cache_allocators.top();
     }
     return allocator;
+}
+MemoryAllocator* ContextImpl::get_cache_allocator() const {
+    BM_ASSERT(!cache_allocators.empty(), "");
+    return cache_allocators.top();
 }
 
 int ContextImpl::current_device() {
@@ -793,6 +798,9 @@ void Context::print_memory_detail() const {
 MemoryAllocator* Context::get_allocator() const {
     return pimpl->get_allocator();
 }
+MemoryAllocator* Context::get_cache_allocator() const {
+    return pimpl->get_cache_allocator();
+}
 
 WithDevice Context::with_device(int dev_id) const {
     return WithDevice(*this, dev_id);
@@ -810,6 +818,9 @@ void Context::enable_debug(int level) const {
 }
 int Context::debug() const {
     return pimpl->debug;
+}
+bool Context::checking_numerics() const {
+    return pimpl->checking_numerics();
 }
 
 Tensor Context::reduce_sum(Tensor& data, DataType out_type) const {
@@ -855,6 +866,7 @@ void Context::free_cache_alloc() {
 void Context::use_cache_alloc(bool b) {
     BM_ASSERT(!b || !pimpl->cache_allocators.empty(), "No cache allocators");
     pimpl->use_cache_alloc_ = b;
+//    pimpl->get_allocator()->set_log(b);
 }
 
 void Context::mem_gc() {
