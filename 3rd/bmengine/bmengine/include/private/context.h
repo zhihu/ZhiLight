@@ -54,6 +54,7 @@ private:
     std::stack<MemoryAllocator*> cache_allocators;
     bool use_cache_alloc_ { false };
     bool aux_;
+    bool checking_numerics_ { false };
 
     void reserve_cache_alloc(size_t s);
     void free_cache_alloc();
@@ -76,6 +77,7 @@ public:
     void release_device();
     DeviceHandles* cur_dev_handle() const;
     MemoryAllocator* get_allocator() const;
+    MemoryAllocator* get_cache_allocator() const;
 
     void push_device(int dev_id);
     void pop_device();
@@ -101,6 +103,7 @@ public:
     void clear_identity_cache();
 
     void recordEvent(const std::string& name, float flops = 0);
+    bool checking_numerics() { return checking_numerics_; }
 };
 
 } // namespace core

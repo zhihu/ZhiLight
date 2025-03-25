@@ -19,6 +19,7 @@
 namespace nn {
 
 using namespace bmengine;
+using bmengine::core::DataType;
 using bmengine::core::DistLayout;
 using bmengine::core::Tensor;
 using model::ModelContext;
@@ -33,6 +34,8 @@ public:
     class Int8Impl;
     class MOEImpl;
     class GPTQMOE;
+
+    std::string name;
 
     virtual ~impl() = default;
     virtual Tensor forward(const core::Context& ctx, const Tensor& input, bool quant_back) = 0;
@@ -77,7 +80,9 @@ public:
           w_gated(ctx, dim_model, dim_ff, "", quant, scale_weights, weight_transposed, parallel, core::DistLayout::COLUMNAR, dtype),
           w_out(ctx, dim_ff, dim_model, "", quant, scale_weights, weight_transposed, parallel, core::DistLayout::ROW, dtype),
           // clang-format on
-          gated_op(ctx, functions::BinaryElementwiseOp::Mul) { }
+          gated_op(ctx, functions::BinaryElementwiseOp::Mul) {
+        name = "FeedForward";
+    }
 
     virtual ~NormalImpl() = default;
 
@@ -144,6 +149,7 @@ public:
         : NormalImpl(ctx, cfg, quant_config, parallel) {
         if (parallel && ctx.high_precision() >= 2)
             w_out.set_output_type(core::DataType::kFloat);
+        name = "FeedForward(Int8)";
     }
     virtual ~Int8Impl() = default;
 
@@ -239,6 +245,8 @@ public:
             BM_ASSERT_EQ(num_experts % ctx.world_size(), 0, "");
             num_local_experts /= ctx.world_size();
         }
+        std::string share_type = dyn_shared ? "dyn" : "TP";
+        name = logger::str_cat("MOE(EP=", exp_parallel, ",Shared=", share_type, ")");
         bool tp = parallel && !exp_parallel;
         for (int i = 0; i < num_local_experts; ++i) {
             experts.push_back(new impl::NormalImpl(ctx, cfg, quant_config, tp));
@@ -534,6 +542,7 @@ public:
         }
 
         vector<Tensor> expert_inputs = slice_dim0(h_reorder, expert_token_num, total_seq_len == 1);
+        // Note: sparse MOE may consume too much memory
         vector<Tensor> expert_ret(num_experts_may_share); // GLOBAL
 
         {
@@ -612,6 +621,7 @@ public:
         bool parallel,
         bool dyn_shared)
         : FeedForward::impl::MOEImpl(ctx, cfg, quant_config, parallel, dyn_shared) {
+        name = "GPTQMOE";
     }
     virtual ~GPTQMOE() = default;
 
@@ -638,7 +648,7 @@ public:
             all_ins.push_back(&experts[i]->w_in);
             all_outs.push_back(&experts[i]->w_out);
         }
-        int routed_scaling_to_weight = utils::get_int_env("ROUTED_SCALING_TO_WEIGHT", 1);
+        int routed_scaling_to_weight = utils::get_int_env("ROUTED_SCALING_TO_WEIGHT", 0);
         if (routed_scaling_to_weight > 0) {
             scale_gptq_scale(ctx, all_gateds);
             routed_scaling_factor = 1.;
@@ -743,9 +753,6 @@ FeedForward::FeedForward(
             ? new impl::GPTQMOE(ctx, cfg, quant_config, parallel, dyn_shared)
             : new impl::MOEImpl(ctx, cfg, quant_config, parallel);
         add_submodule("router", ptr->router);
-        if (ptr->topk_method == "noaux_tc") {
-            add_parameter("router.e_score_correction_bias", ptr->e_score_correction_bias);
-        }
         for (int i = 0; i < ptr->num_local_experts; ++i) {
             auto p = ptr->experts[i];
             int exp_id = ptr->global_expert_id(i);
@@ -774,8 +781,7 @@ FeedForward::FeedForward(
 FeedForward::~FeedForward() = default;
 
 core::Tensor FeedForward::forward(const core::Context& ctx, const core::Tensor& input) {
-    auto moe_impl = dynamic_cast<impl::MOEImpl*>(pimpl.get());
-    core::EventScope event_scope(ctx, moe_impl ? "MOE" : "FeedForward", 1);
+    core::EventScope event_scope(ctx, pimpl->name, 1);
     auto shape2d = {input.numel() / input.size(-1), input.size(-1)};
     const Tensor& input2d = input.ndim() == 2 ? input : input.view(shape2d);
     Tensor ret = pimpl->forward(ctx, input2d, true);
@@ -817,11 +823,15 @@ void FeedForward::load_state_dict(
             moe_impl->shared_expert->try_fuse_up_weights(ctx);
         }
     }
-    if (moe_impl) {
-        if (!moe_impl->e_score_correction_bias.empty()) {
-            moe_impl->e_score_correction_bias = functions::typecast(
-                ctx, moe_impl->e_score_correction_bias, core::DataType::kFloat);
-        }
+    if (moe_impl && moe_impl->topk_method == "noaux_tc") {
+        // Load and auto cast to DataType::kFloat
+        auto it = state_dict.find(prefix + ".router.e_score_correction_bias");
+        BM_ASSERT(it != state_dict.end(), "No e_score_correction_bias.");
+        auto shape = moe_impl->e_score_correction_bias.shape();
+        auto dtype = it->second.dtype() == DataType::kFloat ? DataType::kFloat : moe_impl->dtype;
+        auto temp = ctx.parameter(shape, dtype);
+        ctx.assign_or_copy(&temp, &it->second);
+        moe_impl->e_score_correction_bias = functions::typecast(ctx, temp, core::DataType::kFloat);
     }
 }
 

@@ -1,0 +1,2 @@
+3rd/flash_mla/libflash_mla.a filter=lfs diff=lfs merge=lfs -text
+3rd/deep_gemm/libdeep_gemm.a filter=lfs diff=lfs merge=lfs -text

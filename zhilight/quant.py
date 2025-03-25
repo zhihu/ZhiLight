@@ -16,6 +16,7 @@ class QuantType(enum.Enum):
     FP8 = 7
     GPTQ_Marlin = 8
     AWQ_Marlin = 9
+    FP8_Block = 10
 
 
 def _set_env(name, value):
@@ -63,6 +64,8 @@ class QuantConfig(TypedDict, total=False):
                     raise ValueError(f"Unsupported Marlin {quant_method}")
             elif quant_method == "fp8":
                 cfg["type"] = QuantType.FP8
+                if "weight_block_size" in hf_config:
+                    cfg["type"] = QuantType.FP8_Block
             else:
                 raise ValueError(f"Unsupported quant_method {quant_method}")
         if hf_config.get("desc_act", False):
