@@ -78,7 +78,7 @@ async def lifespan(app: fastapi.FastAPI):
     await engine.stop()
 
 app = fastapi.FastAPI(lifespan=lifespan)
-fake_app = fastapi.FastAPI(lifespan=lifespan)
+fake_app = fastapi.FastAPI()
 
 
 # Add prometheus asgi middleware to route /metrics requests
