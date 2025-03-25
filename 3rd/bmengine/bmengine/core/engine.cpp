@@ -39,6 +39,7 @@ static std::string format_nccl_comm_id(const ncclUniqueId& uniqueID) {
         for (int j = 0; j <= i; j++) {
             oss << std::hex << std::setw(2) << std::setfill('0') << (int)uniqueID.internal[j];
         }
+        break;
     }
     return oss.str();
 }
