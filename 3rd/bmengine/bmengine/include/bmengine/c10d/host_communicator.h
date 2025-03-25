@@ -25,7 +25,9 @@ public:
         }
         char *data;
         if (node_rank_ == 0) { // master node, send
-            if (nbytes == 0) {
+            if constexpr (std::is_same_v<std::decay_t<T>, char*>) {
+                data = reinterpret_cast<char *>(obj_or_buf);
+            } else {
                 std::ostringstream oss(std::ios::binary);
                 boost::archive::binary_oarchive oa(oss);
                 oa << obj_or_buf;
@@ -33,8 +35,6 @@ public:
                 buffer_.assign(str.begin(), str.end());
                 data = buffer_.data();
                 nbytes = static_cast<int>(buffer_.size());
-            } else {
-                data = reinterpret_cast<char *>(obj_or_buf);
             }
 
             for (int i = 1; i < nnodes_; ++i) {
@@ -50,15 +50,15 @@ public:
             sock_->send(msg0);
             zmq::message_t msg;
             sock_->recv(&msg);
-            if (nbytes == 0) {
+            if constexpr (std::is_same_v<std::decay_t<T>, char*>) {
+                //assert(nbytes == static_cast<int>(msg.size()));
+                data = reinterpret_cast<char *>(obj_or_buf);
+                memcpy(data, msg.data(), msg.size());
+            } else {
                 data = reinterpret_cast<char *>(msg.data());
                 std::istringstream iss(std::string(data, data + msg.size()), std::ios::binary);
                 boost::archive::binary_iarchive ia(iss);
                 ia >> obj_or_buf;
-            } else {
-                //assert(nbytes == static_cast<int>(msg.size()));
-                data = reinterpret_cast<char *>(obj_or_buf);
-                memcpy(data, msg.data(), msg.size());
             }
         }
     }
