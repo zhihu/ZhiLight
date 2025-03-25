@@ -31,16 +31,16 @@ static inline int get_int_env(const char* name, int def_val = 0) {
 }
 
 static std::string format_nccl_comm_id(const ncclUniqueId& uniqueID) {
-    std::istringstream iss;
+    std::ostringstream oss;
     for (int i = NCCL_UNIQUE_ID_BYTES - 1; i >= 0; i--) {
         if (uniqueID.internal[i] == 0) {
             continue;
         }
         for (int j = 0; j <= i; j++) {
-            iss << std::hex << std::setw(2) << std::setfill('0') << (int)uniqueID.internal[j];
+            oss << std::hex << std::setw(2) << std::setfill('0') << (int)uniqueID.internal[j];
         }
     }
-    return iss.str();
+    return oss.str();
 }
 
 DeviceHandles::DeviceHandles(int dev_id, ncclUniqueId uniqueID, int tp_rank, int tp_ranks, int pp_rank, int pp_ranks)
