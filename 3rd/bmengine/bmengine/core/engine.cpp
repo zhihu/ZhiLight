@@ -39,7 +39,7 @@ static std::string format_nccl_comm_id(const ncclUniqueId& uniqueID) {
         }
         auto data = reinterpret_cast<const unsigned char *>(uniqueID.internal);
         for (int j = 0; j <= i; j++) {
-            oss << std::hex << std::setw(2) << std::setfill('0') << data[j];
+            oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(data[j]);
         }
         break;
     }
