@@ -1,6 +1,7 @@
 #pragma once
 
 #include "zmq.hpp"
+#include <iostream>
 #include <string>
 #include <sstream>
 #include <boost/archive/binary_iarchive.hpp>
