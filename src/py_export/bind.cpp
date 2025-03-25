@@ -9,6 +9,7 @@ namespace py = pybind11;
 PYBIND11_MODULE(C, m) {
     bind::define_model_config(m);
     bind::define_quant_config(m);
+    bind::define_dist_config(m);
     bind::define_engine(m);
 
     // models

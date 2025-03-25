@@ -1,4 +1,9 @@
 # zhilight Changelog
+## 0.4.5~0.4.17
+- Major Features
+  - Integrated DeepSeekV3 FusedMLA & DeepGEMM
+  - Support multi-nodes tensor parallel inference
+
 ## 0.4.3~4
 - Major Features
   - INT8 kvcache

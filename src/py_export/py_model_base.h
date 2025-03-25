@@ -31,6 +31,11 @@ public:
     bool is_parallel() const {
         return parallel_;
     }
+
+    void set_parallel(bool parallel) {
+        parallel_ = parallel;
+    }
+
     bool is_loaded() const { return loaded_; }
 
     model::ModelBase* get_model(int i) {
