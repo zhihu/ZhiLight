@@ -129,7 +129,7 @@ EngineImpl::EngineImpl(const std::vector<DeviceConfiguration>& dev_cfgs, const D
 
         for (size_t i = 0; i < uniqueIDs.size(); i++) {
             BM_NCCL_ASSERT(ncclGetUniqueId(&uniqueIDs[i]));
-            std::cout << "NCCL comm uniqueID: " << format_nccl_comm_id(uniqueIDs[i]) << std::endl;
+            std::cout << "NCCL comm uniqueID: " << format_nccl_comm_id(uniqueIDs[i]) << "@" << i << std::endl;
         }
 
         hc->broadcast_data(data, nbytes);
