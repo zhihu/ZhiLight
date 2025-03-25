@@ -118,12 +118,12 @@ EngineImpl::EngineImpl(const std::vector<DeviceConfiguration>& dev_cfgs, const D
 
     // broadcast
     hc = new c10d::HostCommunicator(dist_cfg.dist_init_addr, dist_cfg.nnodes, dist_cfg.node_rank);
+    uniqueIDs.resize(pp_ranks);
     if (tp_ranks > 1 || pp_ranks > 1) {
         int nccl_version;
         ncclGetVersion(&nccl_version);
         std::cout << "********* world_size=" << world_size_ << ", nccl_version=" << nccl_version << " *********\n";
 
-        uniqueIDs.resize(pp_ranks);
         char *data = reinterpret_cast<char *>(uniqueIDs.data());
         int nbytes = sizeof(ncclUniqueId) * pp_ranks;
 
