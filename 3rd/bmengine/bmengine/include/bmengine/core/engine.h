@@ -12,8 +12,6 @@ namespace core {
 class Context;
 class MemoryAllocator;
 
-
-
 //class EngineImpl;
 // Engine can be accessed from multiple threads.
 class BMENGINE_EXPORT Engine {
