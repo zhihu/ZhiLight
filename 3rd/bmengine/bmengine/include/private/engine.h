@@ -2,7 +2,7 @@
 //#include "bmengine/core/engine.h"
 #include "bmengine/core/dtype.h"
 #include "bmengine/core/thread_pool.h"
-#include "bmengine/c10d/host_communicator.h"
+//#include "bmengine/c10d/host_communicator.hpp"
 #include <mutex>
 #include <stack>
 #include <nccl.h>
@@ -14,6 +14,9 @@
 
 
 namespace bmengine {
+namespace c10d {
+class HostCommunicator;
+}
 namespace core {
 
 struct DeviceConfiguration {

@@ -2,7 +2,7 @@
 #include "bmengine/core/context.h"
 #include "bmengine/core/exception.h"
 #include "bmengine/logger/std_log_op.hpp"
-#include "bmengine/c10d/host_communicator.h"
+#include "bmengine/c10d/host_communicator.hpp"
 #include <cstdlib>
 #include <iostream>
 #include <mutex>

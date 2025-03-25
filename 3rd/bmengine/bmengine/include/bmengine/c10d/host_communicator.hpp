@@ -14,9 +14,42 @@ public:
     explicit HostCommunicator(
         const std::string addr,
         int nnodes,
-        int node_rank = 0);
+        int node_rank = 0) {
+            addr_ = "tcp://" + addr; // For example -> tcp://10.91.240.4:2025
+            nnodes_ = nnodes;
+            node_rank_ = node_rank;
+        
+            buffer_.resize(4 * 1024 * 1024); // 4M
+        
+            if (nnodes_ > 1) {
+                ctx_ = new zmq::context_t(1);
+                if (node_rank == 0) {
+                    sock_ = new zmq::socket_t(*ctx_, ZMQ_REP);
+                    sock_->bind(addr_.c_str());
+                    for (int i = 1; i < nnodes_; ++i) {
+                        zmq::message_t msg(0);
+                        sock_->recv(&msg);
+                        sock_->send(msg);
+                    }
+                    std::cout << "Node node_rank=" << node_rank_ << " listening on " << addr_ << std::endl;
+                } else {
+                    sock_ = new zmq::socket_t(*ctx_, ZMQ_REQ);
+                    sock_->connect(addr_.c_str());
+                    zmq::message_t msg(0);
+                    sock_->send(msg);
+                    sock_->recv(&msg);
+                    std::cout << "Node node_rank=" << node_rank_ << " connected to " << addr_ << std::endl;
+                }
+            }
+        }
 
-    ~HostCommunicator();
+    ~HostCommunicator() {
+        if (nnodes_ > 1) {
+            sock_->close();
+            delete sock_;
+            delete ctx_;
+        }
+    }
 
     template<typename T>
     void broadcast_data(T &obj_or_buf, int nbytes = 0) {
