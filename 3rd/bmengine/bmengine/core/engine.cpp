@@ -5,6 +5,7 @@
 #include "bmengine/c10d/host_communicator.hpp"
 #include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include <mutex>
 #include <map>
 #include <numeric>
@@ -29,7 +30,7 @@ static inline int get_int_env(const char* name, int def_val = 0) {
 }
 
 static std::string format_nccl_comm_id(const ncclUniqueId& uniqueID) {
-    istringstream iss;
+    std::istringstream iss;
     for (int i = NCCL_UNIQUE_ID_BYTES - 1; i >= 0; i--) {
         if (uniqueID.internal[i] == 0) {
             continue;
