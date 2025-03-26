@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <stdexcept>
+#include <cuda_runtime.h>
 
 namespace bmengine {
 namespace core {
@@ -96,7 +97,7 @@ public:
 
 
     /**************************** Load/Save functions ****************************/
-    void from_buffer(const void* ptr, bool async = false);
+    void from_buffer(const void* ptr, bool async = false, cudaStream_t stream=0);
 
     // Create a tensor from external memory
     // device=-1 means CPU tensor
@@ -108,7 +109,7 @@ public:
         int device = -1,
         bool own_ptr=false);
 
-    void to_buffer(void* ptr) const;
+    void to_buffer(void* ptr, cudaStream_t stream=0) const;
     Tensor to_device(int dev_id = -1) const;
 
     template<typename T>
