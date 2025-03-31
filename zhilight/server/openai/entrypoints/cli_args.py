@@ -106,3 +106,8 @@ def make_arg_parser():
     add_preparse_argmuents(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
     return parser
+
+
+def validate_parsed_serve_args(args: argparse.Namespace):
+    if args.enable_reasoning and not args.reasoning_parser:
+        raise TypeError("Error: `--reasoning-parser` is required if `--enable-reasoning` is enabled.")

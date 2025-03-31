@@ -11,6 +11,8 @@ from zhilight.server.openai.entrypoints.protocol import (
     UsageInfo)
 from zhilight.server.openai.basic.outputs import RequestOutput
 from zhilight.server.openai.entrypoints.serving_engine import OpenAIServing, LoRA
+from zhilight.server.openai.entrypoints.reasoning_parser import ReasoningParser
+
 
 logger = init_logger(__name__)
 
@@ -21,12 +23,18 @@ class OpenAIServingChat(OpenAIServing):
                  served_model: str,
                  response_role: str,
                  lora_modules: Optional[List[LoRA]] = None,
-                 chat_template=None):
+                 chat_template=None,
+                 enable_reasoning: bool = False,
+                 reasoning_parser: Optional[ReasoningParser] = None
+                 ):
         super().__init__(engine=engine,
                          served_model=served_model,
                          lora_modules=lora_modules)
         self.response_role = response_role
         self._load_chat_template(chat_template)
+        self.enable_reasoning = enable_reasoning
+        self.reasoning_parser = reasoning_parser
+    
 
     async def create_chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
@@ -44,7 +52,6 @@ class OpenAIServingChat(OpenAIServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-
         try:
             '''
             prompt = self.tokenizer.apply_chat_template(
@@ -64,7 +71,6 @@ class OpenAIServingChat(OpenAIServing):
             lora_request = self._maybe_get_lora(request)
         except Exception as e:
             return self.create_error_response(str(e))
-
         result_generator = self.engine.generate(prompt, sampling_params,
                                                 raw_request, request_id, None,
                                                 lora_request)
@@ -72,12 +78,11 @@ class OpenAIServingChat(OpenAIServing):
         if request.stream:
             return self.chat_completion_stream_generator(
                 request, raw_request, result_generator, request_id)
-        else:
-            try:
-                return await self.chat_completion_full_generator(
-                    request, raw_request, result_generator, request_id)
-            except Exception as e:
-                return self.create_error_response(str(e))
+        try:
+            return await self.chat_completion_full_generator(
+                request, raw_request, result_generator, request_id)
+        except Exception as e:
+            return self.create_error_response(str(e))
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
         if request.add_generation_prompt:
@@ -89,11 +94,11 @@ class OpenAIServingChat(OpenAIServing):
             self, request: ChatCompletionRequest, raw_request: Request,
             result_generator: AsyncIterator[RequestOutput], request_id: str
     ) -> Union[ErrorResponse, AsyncGenerator[str, None]]:
-
         model_name = request.model
         created_time = int(time.time())
         chunk_object_type = "chat.completion.chunk"
         first_iteration = True
+        should_stream_with_reasoning_parsing =  self._should_stream_with_reasoning_parsing(request)
 
         # Send response for each token for each request.n (index)
         previous_texts = [""] * request.n
@@ -102,7 +107,6 @@ class OpenAIServingChat(OpenAIServing):
         try:
             async for res in result_generator:
                 res: RequestOutput
-                
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST
                 # response (by the try...catch).
@@ -111,9 +115,12 @@ class OpenAIServingChat(OpenAIServing):
                     # the role
                     role = self.get_chat_request_role(request)
                     for i in range(request.n):
+                        delta = DeltaMessage(role=role, content=None)
+                        if should_stream_with_reasoning_parsing:
+                            delta = DeltaMessage(role=role, reasoning_content=None)
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
-                            delta=DeltaMessage(role=role),
+                            delta=delta,
                             logprobs=None,
                             finish_reason=None)
                         chunk = ChatCompletionStreamResponse(
@@ -177,13 +184,19 @@ class OpenAIServingChat(OpenAIServing):
                         logprobs = None
 
                     delta_text = output.text[len(previous_texts[i]):]
+                    delta = DeltaMessage(content=delta_text)
+                    if should_stream_with_reasoning_parsing:
+                        reasoner_parser = ReasoningParser(model_type=self.reasoning_parser)
+                        reasoning_content, _ = reasoner_parser.parse_stream_chunk(delta_text)
+                        if reasoning_content:
+                            delta = DeltaMessage(reasoning_content=reasoning_content)
                     previous_texts[i] = output.text
                     previous_num_tokens[i] = len(output.token_ids)
                     if output.finish_reason is None:
                         # Send token-by-token response for each request.n
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
-                            delta=DeltaMessage(content=delta_text),
+                            delta=delta,
                             logprobs=logprobs,
                             finish_reason=None)
                         chunk = ChatCompletionStreamResponse(
@@ -205,7 +218,7 @@ class OpenAIServingChat(OpenAIServing):
                         )
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
-                            delta=DeltaMessage(content=delta_text),
+                            delta=delta,
                             logprobs=logprobs,
                             finish_reason=output.finish_reason)
                         chunk = ChatCompletionStreamResponse(
@@ -240,6 +253,7 @@ class OpenAIServingChat(OpenAIServing):
         assert final_res is not None
 
         choices = []
+        should_stream_with_reasoning_parsing =  self._should_stream_with_reasoning_parsing(request)
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
@@ -254,10 +268,17 @@ class OpenAIServingChat(OpenAIServing):
                 )
             else:
                 logprobs = None
+            
+            message = ChatMessage(role=role, content=output.text)
+            if should_stream_with_reasoning_parsing:
+                reasoner_parser = ReasoningParser(model_type=self.reasoning_parser, stream_reasoning=False)
+                reasoning_content, normal_text = reasoner_parser.parse_non_stream(output.text)
+                if reasoning_content:
+                    message = ChatMessage(role=role, content=normal_text, reasoning_content=reasoning_content)
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
-                message=ChatMessage(role=role, content=output.text),
+                message=message,
                 logprobs=logprobs,
                 finish_reason=output.finish_reason,
             )
@@ -295,3 +316,11 @@ class OpenAIServingChat(OpenAIServing):
 
     def _load_chat_template(self, chat_template):
         pass
+    
+
+    def _should_stream_with_reasoning_parsing(self,
+                                            request: ChatCompletionRequest):
+        """
+        if reasoning is enabled and a reasoning parser is configured, we should parse the outputs.
+        """
+        return self.enable_reasoning and request.separate_reasoning

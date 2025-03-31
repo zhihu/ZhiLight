@@ -97,6 +97,18 @@ class EngineArgs:
                             action='store_true',
                             help='Ignore eos for pressure test.')
 
+        parser.add_argument(
+            "--enable-reasoning",
+            action="store_true",
+            help="Enable reasoning for the model. If enabled, the model will be able to generate reasoning content."
+        )
+        parser.add_argument(
+            "--reasoning-parser",
+            type=str,
+            choices=["deepseek-r1"],
+            default=None,
+            help="Select the reasoning parser to use. Required if `--enable-reasoning` is enabled."
+        )
         return parser
 
     @classmethod
