@@ -184,9 +184,10 @@ class EngineArgs:
             self.node_rank = 0
         if self.nnodes > 1:
             assert self.node_rank >= 0 and self.node_rank < self.nnodes, f"The node rank should be in range [0, {self.nnodes-1}]."
-            IP_PORT=r"^((?:[0-9]|[1-9][0-9]|1[0-9]{2}|2([0-4][0-9]|5[0-5]))\.){3}" \
-                    r"(?:[0-9]|[1-9][0-9]|1[0-9]{2}|2([0-4][0-9]|5[0-5])):(\d{1,5})$"
-            assert re.match(IP_PORT, self.dist_init_addr), f"Invalid IP:PORT address: {self.dist_init_addr}"
+            # maybe domain name
+            #IP_PORT=r"^((?:[0-9]|[1-9][0-9]|1[0-9]{2}|2([0-4][0-9]|5[0-5]))\.){3}" \
+            #        r"(?:[0-9]|[1-9][0-9]|1[0-9]{2}|2([0-4][0-9]|5[0-5])):(\d{1,5})$"
+            #assert re.match(IP_PORT, self.dist_init_addr), f"Invalid IP:PORT address: {self.dist_init_addr}"
         
         tp = 0 if self.disable_tensor_parallel else self.tensor_parallel
         dist_config = DistConfig(
