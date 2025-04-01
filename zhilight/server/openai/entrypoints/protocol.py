@@ -94,7 +94,7 @@ class ChatCompletionRequest(BaseModel):
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
     # doc: end-chat-completion-sampling-params
-
+    
     # doc: begin-chat-completion-extra-params
     echo: Optional[bool] = Field(
         default=False,
@@ -134,8 +134,9 @@ class ChatCompletionRequest(BaseModel):
         description=(
             "If specified, the output will follow the context free grammar."),
     )
-
     # doc: end-chat-completion-extra-params
+
+    separate_reasoning: Optional[bool] = True
 
     def to_sampling_params(self) -> SamplingParams:
         if self.logprobs and not self.top_logprobs:
@@ -371,6 +372,7 @@ class CompletionStreamResponse(BaseModel):
 class ChatMessage(BaseModel):
     role: str
     content: str
+    reasoning_content: Optional[str] = None
 
 
 class ChatCompletionResponseChoice(BaseModel):
@@ -392,6 +394,8 @@ class ChatCompletionResponse(BaseModel):
 class DeltaMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
+    reasoning_content: Optional[str] = None
+    
 
 
 class ChatCompletionResponseStreamChoice(BaseModel):
