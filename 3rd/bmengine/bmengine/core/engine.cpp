@@ -44,8 +44,8 @@ static std::string format_nccl_comm_id(const ncclUniqueId& uniqueID) {
     return oss.str();
 }
 
-DeviceHandles::DeviceHandles(int dev_id, ncclUniqueId uniqueID, int tp_rank, int tp_ranks, int pp_rank, int pp_ranks)
-    : dev_id(dev_id), tp_rank(tp_rank), tp_ranks(tp_ranks), pp_rank(pp_rank), pp_ranks(pp_ranks) {
+DeviceHandles::DeviceHandles(int dev_id, ncclUniqueId uniqueID, int tp_rank, int tp_size, int pp_rank, int pp_size)
+    : dev_id(dev_id), tp_rank(tp_rank), tp_size(tp_size), pp_rank(pp_rank), pp_size(pp_size) {
     DeviceGuard guard(dev_id);
     BM_CUDART_ASSERT(cudaStreamCreate(&stream));
     BM_CUBLAS_ASSERT(cublasCreate(&cublas_handle));
@@ -53,8 +53,8 @@ DeviceHandles::DeviceHandles(int dev_id, ncclUniqueId uniqueID, int tp_rank, int
 //    ncclConfig_t nccl_config = NCCL_CONFIG_INITIALIZER;
 //    nccl_config.blocking = 0;
 //    BM_NCCL_ASSERT(ncclCommInitRankConfig(&comm, world_size, uniqueID, rank, &nccl_config));
-    if (tp_ranks > 1) {
-        BM_NCCL_ASSERT(ncclCommInitRank(&comm, tp_ranks, uniqueID, tp_rank));
+    if (tp_size > 1) {
+        BM_NCCL_ASSERT(ncclCommInitRank(&comm, tp_size, uniqueID, tp_rank));
         std::cout << "NCCL tp_rank=" << tp_rank << ", pp_rank=" << pp_rank << " connected done!" << std::endl;
     }
     cudaDeviceProp dev_prop{};
@@ -83,7 +83,7 @@ DeviceHandles::~DeviceHandles() {
     try {
         BM_CUBLAS_ASSERT(cublasDestroy(cublas_handle));
         BM_CUDART_ASSERT(cudaStreamDestroy(stream));
-        if (tp_ranks > 1) {
+        if (tp_size > 1) {
             BM_NCCL_ASSERT(ncclCommDestroy(comm));
         }
     } catch (const BMEngineException& e) { std::cerr << e.what() << std::endl; }
@@ -92,16 +92,16 @@ DeviceHandles::~DeviceHandles() {
 EngineImpl::EngineImpl(const std::vector<DeviceConfiguration>& dev_cfgs, const DistConfiguration& dist_cfg)
     : debug(0) {
     std::cout << "tp=" << dist_cfg.tp << ", nnodes=" << dist_cfg.nnodes << ", node_rank=" << dist_cfg.node_rank << std::endl;
-    int tp_ranks = dist_cfg.tp;
+    int tp_size = dist_cfg.tp;
     int local_dev_count = static_cast<int>(dev_cfgs.size());
     int total_dev_count = local_dev_count * dist_cfg.nnodes;
-    if (tp_ranks <= 0) tp_ranks = total_dev_count;
-    BM_ASSERT_EQ(total_dev_count % tp_ranks, 0, "dev_count can't mod tp");
+    if (tp_size <= 0) tp_size = total_dev_count;
+    BM_ASSERT_EQ(total_dev_count % tp_size, 0, "dev_count can't mod tp");
     BM_ASSERT(
         std::thread::hardware_concurrency() > dev_cfgs.size(),
         "at least one cpu-core per device required.");
-    int pp_ranks = total_dev_count / tp_ranks;
-    world_size_ = tp_ranks;
+    int pp_size = total_dev_count / tp_size;
+    world_size_ = tp_size;
     
 
     char* debug_env = std::getenv("BM_DEBUG_LEVEL");
@@ -117,21 +117,21 @@ EngineImpl::EngineImpl(const std::vector<DeviceConfiguration>& dev_cfgs, const D
     }
 
     // broadcast
-    hc = new c10d::HostCommunicator(dist_cfg.dist_init_addr, dist_cfg.nnodes, dist_cfg.node_rank);
-    uniqueIDs.resize(pp_ranks);
-    if (tp_ranks > 1 || pp_ranks > 1) {
+    host_comm = new c10d::HostCommunicator(dist_cfg.dist_init_addr, dist_cfg.nnodes, dist_cfg.node_rank);
+    uniqueIDs.resize(pp_size);
+    if (tp_size > 1 || pp_size > 1) {
         int nccl_version;
         ncclGetVersion(&nccl_version);
         std::cout << "********* world_size=" << world_size_ << ", nccl_version=" << nccl_version << " *********\n";
 
         char *data = reinterpret_cast<char *>(uniqueIDs.data());
-        int nbytes = sizeof(ncclUniqueId) * pp_ranks;
+        int nbytes = sizeof(ncclUniqueId) * pp_size;
 
         for (size_t i = 0; i < uniqueIDs.size(); i++) {
             BM_NCCL_ASSERT(ncclGetUniqueId(&uniqueIDs[i]));
         }
 
-        hc->broadcast_data(data, nbytes);
+        host_comm->broadcast_data(data, nbytes);
         for (size_t i = 0; i < uniqueIDs.size(); i++) {
             std::cout << "NCCL comm uniqueID[" << i << "]: " << format_nccl_comm_id(uniqueIDs[i]) << std::endl;
         }
@@ -141,12 +141,12 @@ EngineImpl::EngineImpl(const std::vector<DeviceConfiguration>& dev_cfgs, const D
     local_ranks_ = 0;
     int rank_base = dist_cfg.node_rank * local_dev_count;
     for (int i = 0; i < local_dev_count; i++) {
-        int tp_rank = (i + rank_base) % tp_ranks;
-        int pp_rank = (i + rank_base) / tp_ranks;
+        int tp_rank = (i + rank_base) % tp_size;
+        int pp_rank = (i + rank_base) / tp_size;
         if (pp_rank == 0) {
             local_ranks_++;
         }
-        handles.push_back(new DeviceHandles(dev_cfgs[i].device_id, uniqueIDs[pp_rank], tp_rank, tp_ranks, pp_rank, pp_ranks));
+        handles.push_back(new DeviceHandles(dev_cfgs[i].device_id, uniqueIDs[pp_rank], tp_rank, tp_size, pp_rank, pp_size));
         MemoryAllocator* allocator = direct_mem_alloc ?
             new DirectMemoryAllocator(dev_cfgs[i].device_id, i, dev_cfgs[i].memory_limit, handles[i]->stream) :
             new MemoryAllocator(dev_cfgs[i].device_id, i, dev_cfgs[i].memory_limit, handles[i]->stream);
@@ -190,7 +190,7 @@ EngineImpl::~EngineImpl() {
     for (auto th : device_threads) {
         delete th;
     }
-    delete hc;
+    delete host_comm;
 }
 
 DeviceHandles* EngineImpl::get_device_handle(int dev_id) {
@@ -229,10 +229,10 @@ int EngineImpl::num_gpus() const {
 }
 
 int EngineImpl::nnodes() const {
-    return hc->get_nnodes();
+    return host_comm->get_nnodes();
 }
 int EngineImpl::node_rank() const {
-    return hc->get_node_rank();
+    return host_comm->get_node_rank();
 }
 
 GPUInfo EngineImpl::get_gpu_info(int dev_id) {

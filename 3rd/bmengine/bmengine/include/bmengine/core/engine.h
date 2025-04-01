@@ -32,7 +32,7 @@ public:
     int node_rank() const;
     template <typename T>
     void broadcast_data(T &data, int nbytes = 0) {
-        pimpl->hc->broadcast_data(data, nbytes);
+        pimpl->host_comm->broadcast_data(data, nbytes);
     }
     GPUInfo get_gpu_info(int device_idx) const;
 

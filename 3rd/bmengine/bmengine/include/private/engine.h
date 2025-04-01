@@ -47,9 +47,9 @@ public:
 
     // the following four parameters determine the weights range of the model
     int tp_rank;
-    int tp_ranks;
+    int tp_size;
     int pp_rank;
-    int pp_ranks;
+    int pp_size;
 
     int compute_capability;
     int mp_count;
@@ -60,9 +60,9 @@ public:
         int dev_id,
         ncclUniqueId uniqueID,
         int tp_rank = 0,
-        int tp_ranks = 1,
+        int tp_size = 1,
         int pp_rank = 0,
-        int pp_ranks = 1);
+        int pp_size = 1);
     ~DeviceHandles();
     DeviceHandles(const DeviceHandles&) = delete;
     DeviceHandles& operator=(const DeviceHandles&) = delete;
@@ -80,7 +80,7 @@ class EngineImpl {
     std::vector<std::mutex*> device_lock;
     std::vector<TaskThreadPool*> device_threads;
     // for host
-    c10d::HostCommunicator* hc;
+    c10d::HostCommunicator* host_comm;
     // for nccl
     std::vector<ncclUniqueId> uniqueIDs;
     int world_size_;
