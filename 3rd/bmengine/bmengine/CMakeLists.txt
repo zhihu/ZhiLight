@@ -44,6 +44,7 @@ set_property(TARGET bmengine PROPERTY CMAKE_CUDA_VISIBILITY_PRESET hidden)
 target_include_directories(bmengine 
     PUBLIC "include"
     PUBLIC "include/private/3rd/"
+    PUBLIC "../../zmq"
     PUBLIC ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
 )
 
