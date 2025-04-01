@@ -45,7 +45,7 @@ from zhilight.server.openai.basic.utils import (
                                     get_options_info,
                                     make_async,
                                     force_install_packages)
-from zhilight.server.openai.entrypoints.cli_args import make_arg_parser, validate_parsed_serve_args
+from zhilight.server.openai.entrypoints.cli_args import make_arg_parser, validate_parsed_serve_args, OpenAIServingArgs
 from zhilight.server.openai.entrypoints.serving_chat import OpenAIServingChat
 from zhilight.server.openai.entrypoints.serving_completion import OpenAIServingCompletion
 from zhilight.server.openai.entrypoints.middleware import add_middleware
@@ -165,13 +165,14 @@ if __name__ == "__main__":
         served_model = args.model_path
 
     engine_args = AsyncEngineArgs.from_cli_args(args)
+    logger.info(f"engine args: {engine_args}")
     engine = AsyncLLMEngine.from_engine_args(engine_args)
+    serving_args = OpenAIServingArgs.from_cli_args(args)
+    logger.info(f"openai serving args: {serving_args}")
     openai_serving_chat = OpenAIServingChat(
         engine, 
         served_model, 
-        args.response_role, 
-        enable_reasoning=args.enable_reasoning, 
-        reasoning_parser=args.reasoning_parser
+        serving_args,
         )
     openai_serving_completion = OpenAIServingCompletion(engine, served_model)
 

@@ -4,6 +4,7 @@ from typing import AsyncGenerator, AsyncIterator, Optional, List, Union
 from zhilight.server.openai.basic.logger import init_logger
 from zhilight.server.openai.basic.utils import get_traceid
 from zhilight.server.openai.engine.async_llm_engine import AsyncLLMEngine
+from zhilight.server.openai.entrypoints.cli_args import OpenAIServingArgs
 from zhilight.server.openai.entrypoints.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
@@ -21,19 +22,17 @@ class OpenAIServingChat(OpenAIServing):
     def __init__(self,
                  engine: AsyncLLMEngine,
                  served_model: str,
-                 response_role: str,
+                 serving_args: OpenAIServingArgs,
                  lora_modules: Optional[List[LoRA]] = None,
                  chat_template=None,
-                 enable_reasoning: bool = False,
-                 reasoning_parser: Optional[ReasoningParser] = None
                  ):
         super().__init__(engine=engine,
                          served_model=served_model,
                          lora_modules=lora_modules)
-        self.response_role = response_role
         self._load_chat_template(chat_template)
-        self.enable_reasoning = enable_reasoning
-        self.reasoning_parser = reasoning_parser
+        self.response_role = serving_args.response_role
+        self.enable_reasoning = serving_args.enable_reasoning
+        self.reasoning_parser = serving_args.reasoning_parser
     
 
     async def create_chat_completion(
@@ -99,7 +98,8 @@ class OpenAIServingChat(OpenAIServing):
         chunk_object_type = "chat.completion.chunk"
         first_iteration = True
         should_stream_with_reasoning_parsing =  self._should_stream_with_reasoning_parsing(request)
-
+        if should_stream_with_reasoning_parsing:
+            reasoner_parser = ReasoningParser(model_type=self.reasoning_parser)
         # Send response for each token for each request.n (index)
         previous_texts = [""] * request.n
         previous_num_tokens = [0] * request.n
@@ -186,7 +186,6 @@ class OpenAIServingChat(OpenAIServing):
                     delta_text = output.text[len(previous_texts[i]):]
                     delta = DeltaMessage(content=delta_text)
                     if should_stream_with_reasoning_parsing:
-                        reasoner_parser = ReasoningParser(model_type=self.reasoning_parser)
                         reasoning_content, _ = reasoner_parser.parse_stream_chunk(delta_text)
                         if reasoning_content:
                             delta = DeltaMessage(reasoning_content=reasoning_content)
@@ -254,6 +253,8 @@ class OpenAIServingChat(OpenAIServing):
 
         choices = []
         should_stream_with_reasoning_parsing =  self._should_stream_with_reasoning_parsing(request)
+        if should_stream_with_reasoning_parsing:
+            reasoner_parser = ReasoningParser(model_type=self.reasoning_parser)
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
@@ -271,10 +272,9 @@ class OpenAIServingChat(OpenAIServing):
             
             message = ChatMessage(role=role, content=output.text)
             if should_stream_with_reasoning_parsing:
-                reasoner_parser = ReasoningParser(model_type=self.reasoning_parser, stream_reasoning=False)
-                reasoning_content, normal_text = reasoner_parser.parse_non_stream(output.text)
+                reasoning_content, content = reasoner_parser.parse_non_stream(output.text)
                 if reasoning_content:
-                    message = ChatMessage(role=role, content=normal_text, reasoning_content=reasoning_content)
+                    message = ChatMessage(role=role, content=content, reasoning_content=reasoning_content)
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
