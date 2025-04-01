@@ -7,6 +7,8 @@ purposes.
 import argparse
 import json
 import ssl
+import dataclasses
+from dataclasses import dataclass
 
 from zhilight.server.openai.engine.arg_utils import AsyncEngineArgs
 from zhilight.server.openai.entrypoints.serving_engine import LoRA
@@ -21,6 +23,38 @@ class LoRAParserAction(argparse.Action):
             name, path = item.split('=')
             lora_list.append(LoRA(name, path))
         setattr(namespace, self.dest, lora_list)
+
+
+@dataclass
+class OpenAIServingArgs:
+    response_role: str
+    enable_reasoning: bool
+    reasoning_parser: str
+
+    @staticmethod
+    def add_cli_args(
+            parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        parser.add_argument(
+            "--enable-reasoning",
+            action="store_true",
+            help="Enable reasoning for the model. If enabled, the model will be able to generate reasoning content."
+        )
+        parser.add_argument(
+            "--reasoning-parser",
+            type=str,
+            choices=["deepseek-r1"],
+            default=None,
+            help="Select the reasoning parser to use. Required if `--enable-reasoning` is enabled."
+        )
+        return parser
+
+    @classmethod
+    def from_cli_args(cls, args: argparse.Namespace) -> 'OpenAIServingArgs':
+        return cls(
+            response_role=args.response_role,
+            enable_reasoning=args.enable_reasoning,
+            reasoning_parser=args.reasoning_parser,
+        )
 
 
 def make_arg_parser():
@@ -105,4 +139,10 @@ def make_arg_parser():
 
     add_preparse_argmuents(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
+    parser = OpenAIServingArgs.add_cli_args(parser)
     return parser
+
+
+def validate_parsed_serve_args(args: argparse.Namespace):
+    if args.enable_reasoning and not args.reasoning_parser:
+        raise TypeError("Error: `--reasoning-parser` is required if `--enable-reasoning` is enabled.")
