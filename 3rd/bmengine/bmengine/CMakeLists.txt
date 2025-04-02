@@ -10,7 +10,7 @@ if(NOT APPLE)
   enable_language(CUDA)
 endif()
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/)
 
@@ -44,6 +44,7 @@ set_property(TARGET bmengine PROPERTY CMAKE_CUDA_VISIBILITY_PRESET hidden)
 target_include_directories(bmengine 
     PUBLIC "include"
     PUBLIC "include/private/3rd/"
+    PUBLIC "../../zmq"
     PUBLIC ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
 )
 

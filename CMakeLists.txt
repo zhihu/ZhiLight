@@ -7,7 +7,7 @@ enable_language(CXX)
 
 set(CMAKE_CUDA_ARCHITECTURES $ENV{CMAKE_CUDA_ARCHITECTURES})
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES "80;89")
+    set(CMAKE_CUDA_ARCHITECTURES "80;89;90a")
 endif()
 message("CMAKE_CUDA_ARCHITECTURES: ${CMAKE_CUDA_ARCHITECTURES}")
 enable_language(CUDA)
@@ -71,6 +71,11 @@ execute_process(
 	OUTPUT_STRIP_TRAILING_WHITESPACE)
 find_package(pybind11 REQUIRED)
 
+find_package(Boost 1.71.0 REQUIRED COMPONENTS serialization)
+if(NOT Boost_FOUND OR NOT TARGET Boost::serialization)
+    message(FATAL_ERROR "Could not find required component Boost::serialization of the Boost library.")
+endif()
+
 file(GLOB_RECURSE BACKEND_SOURCES
     "src/*.cpp"
     "src/*.cu"
@@ -89,22 +94,27 @@ message("FLASH_ATTN_SO: " ${FLASH_ATTN_SO})
 target_include_directories(backend
     PUBLIC "src"
     PUBLIC "3rd/flash_decoding"
+    PUBLIC "3rd/zmq"
     PUBLIC "3rd/flash_mla"
     PUBLIC ${NCCL_INCLUDE_DIRS}
     PUBLIC ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
     PUBLIC ${Python_SITELIB}/torch/include
+    PUBLIC ${Boost_INCLUDE_DIRS}
 )
 
 target_link_directories(backend
+    PUBLIC "3rd/tensorrt_llm/"
+    PUBLIC "3rd/zmq"
     PUBLIC "3rd/deep_gemm/"
     PUBLIC "3rd/flash_mla/"
     PUBLIC ${NCCL_LIBRARIES}
     PUBLIC ${Python_SITELIB}/torch/lib
     PUBLIC ${Python_SITELIB}
+    PUBLIC ${Boost_LIBRARY_DIRS}
 )
 
 target_link_libraries(backend
-    PUBLIC bmengine
+    PUBLIC bmengine zmq Boost::serialization
     "-Wl,-Bsymbolic -Wl,-Bsymbolic-functions"
     ":${FLASH_ATTN_SO}"
     "deep_gemm"

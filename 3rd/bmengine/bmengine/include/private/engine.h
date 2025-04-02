@@ -1,6 +1,8 @@
 #pragma once
-#include "bmengine/core/engine.h"
+#include "bmengine/core/dtype.h"
+#include "bmengine/core/engine_config.h"
 #include "bmengine/core/thread_pool.h"
+#include "bmengine/c10d/host_communicator.hpp"
 #include <mutex>
 #include <stack>
 #include <nccl.h>
@@ -10,8 +12,8 @@
 #include "private/allocator.h"
 #include "private/stream.h"
 
-namespace bmengine {
 
+namespace bmengine {
 namespace core {
 
 class DeviceHandles {
@@ -20,13 +22,25 @@ public:
     cudaStream_t stream;
     cublasHandle_t cublas_handle;
     ncclComm_t comm;
-    int rank;
+
+    // the following four parameters determine the weights range of the model
+    int tp_rank;
+    int tp_size;
+    int pp_rank;
+    int pp_size;
+
     int compute_capability;
     int mp_count;
     int l2_cache_size;
     int max_shared_memory;
 
-    DeviceHandles(int dev_id, ncclUniqueId uniqueID, int rank, int world_size);
+    DeviceHandles(
+        int dev_id,
+        ncclUniqueId uniqueID,
+        int tp_rank = 0,
+        int tp_size = 1,
+        int pp_rank = 0,
+        int pp_size = 1);
     ~DeviceHandles();
     DeviceHandles(const DeviceHandles&) = delete;
     DeviceHandles& operator=(const DeviceHandles&) = delete;
@@ -43,15 +57,18 @@ class EngineImpl {
     std::vector<StreamAllocator*> streams;
     std::vector<std::mutex*> device_lock;
     std::vector<TaskThreadPool*> device_threads;
+    // for host
+    c10d::HostCommunicator* host_comm;
     // for nccl
     std::vector<ncclUniqueId> uniqueIDs;
     int world_size_;
+    int local_ranks_;
 
     int debug;
     bool is_mem_frozen { false };
 
 public:
-    EngineImpl(const std::vector<DeviceConfiguration>& cfg, int tp);
+    EngineImpl(const std::vector<DeviceConfiguration>& cfg, const DistConfiguration& dist_cfg);
     ~EngineImpl();
     EngineImpl(const EngineImpl&) = delete;
     EngineImpl& operator=(const EngineImpl&) = delete;
@@ -78,6 +95,8 @@ public:
     GPUInfo get_gpu_info(int dev_id);
     int num_gpus() const;
     int world_size() const { return world_size_; }
+    int nnodes() const;
+    int node_rank() const;
 
     void print_memory_summary();
     void freeze_model_memory();

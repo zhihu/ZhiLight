@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <limits>
 #include <chrono>
+#include <fstream>
 #include <unistd.h>
 #include <sys/syscall.h>
 
@@ -67,11 +68,15 @@ len_t round_up_len(len_t len, len_t d = INCR_SIZE) {
 void SearchTask_::finish(generator::SearchResults&& results) {
     BM_ASSERT(!results.results.empty(), "finish without result!");
     callback(results);
-    res_queue.emplace(std::move(results));
+    if (!canceled) {
+        res_queue.emplace(std::move(results));
+    }
 }
 
 void SearchTask_::update_stream(const generator::SearchResults& results) {
-    res_queue.push(results, true);
+    if (!canceled) {
+        res_queue.push(results, true);
+    }
 }
 
 TaskQueue::TaskQueue(int max_size) : max_size_(max_size) {}
@@ -764,7 +769,7 @@ public:
     }
 
     void init_slot(len_t b, SearchTask task) {
-        max_batch_active = std::max(b + 1, max_batch_active);
+        max_batch_active = std::max(b + 1, max_batch_active); // 这里传入的max_batch_active会不会有问题，会不会有多个空洞？？？
 
         tasks[b] = task;
         // std::cout << "task: b=" << b  << ", random=" << task->is_random() << ", seed=" << task->seed << "\n";
@@ -969,12 +974,12 @@ void SearcherImplV1<int, int>::fill_encode_input(vector<SearchTask>& new_tasks) 
 
     vector<int> v_batch(new_tasks.size());
     vector<int> input_lens(new_tasks.size());
-    vector<int> full_input_lens(new_tasks.size()); // flash attention need real length
+    vector<int> full_input_lens(new_tasks.size());
     vector<int> buf_lens(new_tasks.size());
     // fill matrices of input tokens
     RagVector<int32_t> h_token;
-    RagVector<int32_t> h_batch; // batch in buffer
-    RagVector<int32_t> h_placement; // pos in buffer
+    RagVector<int32_t> h_batch;
+    RagVector<int32_t> h_placement;
     RagVector<int32_t> h_position;
     RagVector<int8_t> h_mask;
 
@@ -1285,7 +1290,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
             active_count = max_batch_active;
         }
         searcher->active_size_ = active_count;
-        if (active_count == 0 && searcher->queue_.size() == 0) {
+        if (searcher->engine_->node_rank() == 0 && active_count == 0 && searcher->queue_.size() == 0) {
             searcher->done_cond_.notify_all();
         }
         int max_total_token;
@@ -1301,12 +1306,16 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
                 ctx.use_cache_alloc(false);
             }
             int limit = 1; // dual_stream ? 1 : max_batch - active_count;
-            new_tasks = searcher->queue_.pop_multi(
-                limit, active_count == 0, 1, max_total_token, pre_alloc);
-            for (auto task: new_tasks) {
-                task->begin_ts = logger::get_time_us();
+            if (searcher->engine_->node_rank() == 0) {
+                new_tasks = searcher->queue_.pop_multi(
+                    limit, active_count == 0, 1, max_total_token, pre_alloc);
+                for (auto task: new_tasks) {
+                    task->begin_ts = logger::get_time_us();
+                }
             }
+            searcher->engine_->broadcast_data(new_tasks);
         }
+
         if (searcher->stopping_) {
             break;
         } else if (max_batch_active == 0) {
@@ -1327,6 +1336,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
         }
         bool feed_input_embedding = !new_tasks.empty() && !new_tasks[0]->input_embeddings.empty();
         if (feed_input_embedding && tasks[0]) {
+            BM_ASSERT(searcher->engine_->nnodes() == 1, "feed_input_embedding only support single node, now");
             int b = assign_free_slot(tasks[0]);
             if (debug_level) std::cout << "Move task 0 to " << b << endl;
             move_task(b, 0); // move tasks[0] to b
@@ -1354,6 +1364,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
         if (config.enable_prompt_caching) {
             save_prompt_cache();
         }
+
         if (logits_all.numel() == 0) {
             BM_ASSERT(in_chunking(), "");
             max_batch_active = 1;
@@ -1398,7 +1409,9 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
                 SearchResults results{};
                 results.results = result_mgr[b].get_search_results(num);
                 results.first_token_delay_ms = tasks[b]->first_token_delay_ms;
-                tasks[b]->finish(std::move(results));
+                if (searcher->engine_->node_rank() == 0) {
+                    tasks[b]->finish(std::move(results));
+                }
                 tasks[b].reset();
                 if (in_chunking()) {
                     BM_ASSERT(chunking_b > 0, "");
@@ -1410,13 +1423,14 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
                      std::cout << "Current steps: " << steps << "\n";
                 }
             }
-            if (tasks[b] && tasks[b]->canceled) {
+            // TODO: cancel for multi nodes TP
+            if (searcher->engine_->nnodes() == 1 && tasks[b] && tasks[b]->canceled) {
                 tasks[b].reset();
                 std::cout << "Cancel search task " << b << "\n";
             }
             if (tasks[b]) {
                 active_count++;
-                max_batch_active = b + 1;
+                max_batch_active = b + 1; 
             } else if (config.rag_buffer) {
                 erase_task(b);
                 b--;
@@ -1549,7 +1563,9 @@ void SearcherImplV1<int, int>::update_stream(
         // increasingly update
         if (word_id != config.eos_id) {
             stream_res[b].stream.append(word_id);
-            tasks[b]->update_stream(stream_res[b]);
+            if (searcher->engine_->node_rank() == 0) {
+                tasks[b]->update_stream(stream_res[b]);
+            }
         }
     } else {
         // full update
@@ -1557,7 +1573,9 @@ void SearcherImplV1<int, int>::update_stream(
         auto tmp_res = bm[b].get_hypo_tokens(word_id, is_eos, last_hypo_pos);
         BM_ASSERT(tmp_res.size() > 0, "No results");
         stream_res[b].stream.update(std::move(tmp_res), t);
-        tasks[b]->update_stream(stream_res[b]);
+        if (searcher->engine_->node_rank() == 0) {
+            tasks[b]->update_stream(stream_res[b]);
+        }
     }
 }
 

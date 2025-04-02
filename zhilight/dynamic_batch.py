@@ -375,7 +375,7 @@ class DynamicBatchGenerator:
         self._c_generator = C.BatchGenerator(self.config.c_config(), self.c_model)
         self._thread = None
         self.print_queue_threshold = int(os.environ.get("print_queue_threshold", 0))
-        self._do_verify = int(os.environ.get("VERIFY_MAX_TOKEN", 1)) > 0
+        self._do_verify = self.model.dist_config.node_rank == 0 and int(os.environ.get("VERIFY_MAX_TOKEN", 1)) > 0
         if self._do_verify:
             self.start()
             arg = GeneratorArg(max_length=1)

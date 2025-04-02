@@ -31,13 +31,18 @@ public:
         EnginePtr engine,
         model::ModelConfig model_config,
         model::QuantConfig quant_config,
-        bool parallel)
-        : PyModelBase("llama", parallel), engine_(engine), model_config_(model_config) {
+        bmengine::core::DistConfiguration dist_config)
+        : PyModelBase("llama", false), engine_(engine), model_config_(model_config) {
         std::cout << model_config.to_string() << std::endl;
-        if (!parallel && engine->num_gpus() > 1) {
-            throw std::runtime_error("WARNING: Use parallel=false with multiple GPU !!!");
+        std::cout << "tp=" << dist_config.tp << ", nnodes=" << dist_config.nnodes << ", node_rank=" << dist_config.node_rank << std::endl;
+
+        bool parallel = false;
+        if (dist_config.tp > 1 || (dist_config.tp < 0 && (engine->num_gpus() > 1 || dist_config.nnodes > 1))) {
+            parallel = true;
         }
-        models_.resize(engine->world_size());
+        set_parallel(parallel);
+
+        models_.resize(engine->local_ranks());
         engine->device_foreach([this, &model_config, quant_config, parallel](int i) {
             auto ctx = engine_->create_context_rank(i);
             auto with_device = ctx.with_device(0);
@@ -62,8 +67,8 @@ public:
         EnginePtr engine,
         model::ModelConfig& model_config,
         model::QuantConfig quant_config,
-        bool parallel = false) {
-        return PyLLaMA(engine, model_config, quant_config, parallel);
+        bmengine::core::DistConfiguration dist_config) {
+        return PyLLaMA(engine, model_config, quant_config, dist_config);
     }
 
     virtual bmengine::core::Engine* engine() {
