@@ -55,10 +55,10 @@ Tensor Tensor::view_type(const std::vector<size_t>& size, DataType dtype) const 
     return Tensor(pimpl_->view_type(size, dtype));
 }
 
-void Tensor::from_buffer(const void* ptr, bool async) {
-    BM_CUDART_ASSERT(cudaMemcpyAsync(mutable_data(), ptr, nbytes(), cudaMemcpyHostToDevice, 0));
+void Tensor::from_buffer(const void* ptr, bool async, cudaStream_t stream) {
+    BM_CUDART_ASSERT(cudaMemcpyAsync(mutable_data(), ptr, nbytes(), cudaMemcpyHostToDevice, stream));
     if (!async) {
-        BM_CUDART_ASSERT(cudaStreamSynchronize(0));
+        BM_CUDART_ASSERT(cudaStreamSynchronize(stream));
     }
     BM_CUDART_ASSERT(cudaGetLastError());
 }
@@ -135,8 +135,9 @@ int Tensor::device() const {
     return pimpl()->device();
 }
 
-void Tensor::to_buffer(void* ptr) const {
-    BM_CUDART_ASSERT(cudaMemcpy(ptr, data(), nbytes(), cudaMemcpyDeviceToHost));
+void Tensor::to_buffer(void* ptr, cudaStream_t stream) const {
+    BM_CUDART_ASSERT(cudaMemcpyAsync(ptr, data(), nbytes(), cudaMemcpyDeviceToHost, stream));
+    BM_CUDART_ASSERT(cudaStreamSynchronize(stream));
 }
 
 std::vector<Tensor> Tensor::chunk() const {

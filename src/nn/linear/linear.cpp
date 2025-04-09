@@ -89,9 +89,14 @@ Tensor concat_dim0(const core::Context& ctx, std::vector<Tensor*> tensors, bool 
     return ret;
 }
 static Tensor concat2_dim0(const core::Context& ctx, Tensor& a, Tensor& b) {
+    BM_ASSERT_EQ(a.shape(), b.shape(), "shape mismatch");
+    if (a.empty()) return {};
     return concat_dim0(ctx, {&a, &b}, false);
 }
 static Tensor concat3_dim0(const core::Context& ctx, Tensor& q, Tensor& k, Tensor& v) {
+    BM_ASSERT_EQ(q.shape(), k.shape(), "shape mismatch");
+    BM_ASSERT_EQ(q.shape(), v.shape(), "shape mismatch");
+    if (q.empty()) return {};
     return concat_dim0(ctx, {&q, &k, &v}, false);
 }
 
@@ -132,6 +137,15 @@ public:
     class GPTQMarlin;
     class AWQ;
 
+    struct Fuser {
+        typedef impl* (*FN_FUSE2)(const core::Context& ctx, impl& a, impl& b);
+        typedef impl* (*FN_FUSE3)(const core::Context& ctx, impl& a, impl& b, impl& c);
+        typedef impl* (*FN_FUSE_DIM0)(const core::Context& ctx, const std::vector<impl*>& layers);
+        FN_FUSE2 fuse2 { nullptr };  // for FeedForward
+        FN_FUSE3 fuse3 { nullptr }; // for Attention to fuse Q,K,V
+        FN_FUSE_DIM0 fuse_dim0 { nullptr }; // MOE to fuse all experts
+    };
+
     uint32_t dim_in;
     uint32_t dim_out;
     bool parallel;
@@ -151,6 +165,14 @@ public:
     virtual void scale_output(float scale) = 0;
     virtual void set_output_type(core::DataType dtype) = 0;
     virtual void set_compute_type(cublasComputeType_t compute_type) {}
+
+    virtual Fuser weight_fuser() const {
+        return {nullptr, nullptr, nullptr};
+    }
+
+    virtual vector<impl*> split(const core::Context& ctx, size_t n_split, bool by_out) {
+        return {};
+    }
 
     virtual core::Tensor forward(
         const core::Context& ctx,
@@ -268,7 +290,15 @@ public:
         has_bias = b;
     }
 
-    static NormalLinear* fuse(const core::Context& ctx, NormalLinear& a, NormalLinear& b) {
+    Fuser weight_fuser() const override {
+        return {
+            reinterpret_cast<Fuser::FN_FUSE2>(NormalLinear::fuse2),
+            reinterpret_cast<Fuser::FN_FUSE3>(NormalLinear::fuse3),
+            nullptr
+        };
+    }
+
+    static impl* fuse2(const core::Context& ctx, NormalLinear& a, NormalLinear& b) {
         BM_ASSERT_EQ(a.scale_factor, b.scale_factor, "scale_factor not equal");
         uint32_t dim_out = a.dim_out + b.dim_out;
         NormalLinear* ret = new NormalLinear(
@@ -290,7 +320,7 @@ public:
         return ret;
     }
 
-    static NormalLinear* fuse(const core::Context& ctx, NormalLinear& q, NormalLinear& k, NormalLinear& v) {
+    static NormalLinear* fuse3(const core::Context& ctx, NormalLinear& q, NormalLinear& k, NormalLinear& v) {
         BM_ASSERT_EQ(q.scale_factor, k.scale_factor, "scale_factor not equal");
         BM_ASSERT_EQ(q.scale_factor, v.scale_factor, "scale_factor not equal");
         uint32_t dim_out = q.dim_out + k.dim_out + v.dim_out;
@@ -392,7 +422,14 @@ public:
 
     cublasLtMatmulDesc_t matmul_desc;
 
-    static Int8Linear* fuse(const core::Context& ctx, Int8Linear& q, Int8Linear& k, Int8Linear& v) {
+    Fuser weight_fuser() const override {
+        return {
+            nullptr,
+            reinterpret_cast<Fuser::FN_FUSE3>(Int8Linear::fuse3),
+            nullptr
+        };
+    }
+    static Int8Linear* fuse3(const core::Context& ctx, Int8Linear& q, Int8Linear& k, Int8Linear& v) {
         int dim_out = q.dim_out + k.dim_out + v.dim_out;
         auto dist_layout = transpose_layout(q.dist_layout);
         Int8Linear* ret = new Int8Linear(
@@ -659,14 +696,16 @@ public:
         qweight = scales = qzeros = g_idx = Tensor();
     }
 
-    static Int4GPTQ* fuse_dim0(const core::Context& ctx, const std::vector<Int4GPTQ*>& layers) {
+    static impl* fuse_dim0(const core::Context& ctx, const std::vector<impl*>& layers) {
         BM_ASSERT(!layers.empty(), "");
-        Int4GPTQ& a = *layers[0];
+        Int4GPTQ& a = *dynamic_cast<Int4GPTQ*>(layers[0]);
         BM_ASSERT(!a.has_bias, "");
         BM_ASSERT(!a.g_idx.numel(), "");
         std::vector<Tensor*> all_weights, all_zeros, all_scales;
         std::vector<Tensor*> all_g_idx, all_q_perm_i16, all_rev_perm;
-        for (auto m: layers) {
+        for (auto l: layers) {
+            Int4GPTQ* m = dynamic_cast<Int4GPTQ*>(l);
+            BM_ASSERT(m, "Wrong sub layers impl type");
             all_weights.push_back(&m->qweight);
             all_zeros.push_back(&m->qzeros);
             all_scales.push_back(&m->scales);
@@ -691,7 +730,7 @@ public:
         return ret;
     }
 
-    vector<Int4GPTQ*> split(const core::Context& ctx, size_t n_split, bool by_out) {
+    vector<impl*> split(const core::Context& ctx, size_t n_split, bool by_out) override {
         BM_ASSERT(loaded, "");
         BM_ASSERT(new_kernel && use_exllama, "");
         BM_ASSERT(!has_bias, "");
@@ -726,10 +765,21 @@ public:
                 results[i]->qweight.set_name(qweight.name());
             }
         }
-        return results;
+        return *reinterpret_cast<vector<impl*>*>(&results);
     }
 
-    static Int4GPTQ* fuse(const core::Context& ctx, Int4GPTQ& a, Int4GPTQ& b) {
+    Fuser weight_fuser() const override {
+        return {
+            reinterpret_cast<Fuser::FN_FUSE2>(Int4GPTQ::fuse2),
+            reinterpret_cast<Fuser::FN_FUSE3>(Int4GPTQ::fuse3),
+            Int4GPTQ::fuse_dim0,
+        };
+    }
+
+    static Int4GPTQ* fuse2(const core::Context& ctx, Int4GPTQ& a, Int4GPTQ& b) {
+        if (!a.use_exllama || !b.use_exllama || a.act_order)
+            return nullptr;
+
         auto dim_out = a.dim_out + b.dim_out;
         Int4GPTQ* ret = new Int4GPTQ(
             ctx, a.dim_in, dim_out, "", a.quant, a.dtype, a.parallel, a.dist_layout, a.act_order, a.group_size, a.sym);
@@ -757,10 +807,14 @@ public:
         ret->trt_kernel = a.trt_kernel;
         ret->size_n1 = a.dim_out;
         ret->size_n2 = a.dim_out + b.dim_out;
+        ret->use_exllama = true;
         return ret;
     }
 
     static Int4GPTQ* fuse3(const core::Context& ctx, Int4GPTQ& q, Int4GPTQ& k, Int4GPTQ& v) {
+        if (!q.use_exllama || !k.use_exllama || v.act_order)
+            return nullptr;
+
         auto dim_out = q.dim_out + k.dim_out + v.dim_out;
         Int4GPTQ *ret = new Int4GPTQ(
             ctx, q.dim_in, dim_out, "", q.quant, q.dtype, q.parallel, q.dist_layout, q.act_order, q.group_size, q.sym);
@@ -784,6 +838,7 @@ public:
         ret->trt_kernel = q.trt_kernel;
         ret->size_n1 = q.dim_out;
         ret->size_n2 = q.dim_out + k.dim_out;
+        ret->use_exllama = true;
         return ret;
     }
 
@@ -1217,7 +1272,15 @@ public:
         qweight = scales = qzeros = Tensor();
     }
 
-    static GPTQMarlin* fuse(const core::Context& ctx, GPTQMarlin& a, GPTQMarlin& b) {
+    Fuser weight_fuser() const override {
+        return {
+            reinterpret_cast<Fuser::FN_FUSE2>(GPTQMarlin::fuse2),
+            reinterpret_cast<Fuser::FN_FUSE3>(GPTQMarlin::fuse3),
+            nullptr
+        };
+    }
+
+    static GPTQMarlin* fuse2(const core::Context& ctx, GPTQMarlin& a, GPTQMarlin& b) {
         if (a.loaded || b.loaded) return nullptr;
         BM_ASSERT(!a.loaded, "");
         auto dim_out = a.dim_out + b.dim_out;
@@ -1393,7 +1456,15 @@ public:
         qweight = scales = qzeros = Tensor();
     }
 
-    static AWQ* fuse(const core::Context& ctx, AWQ& a, AWQ& b) {
+    Fuser weight_fuser() const override {
+        return {
+            reinterpret_cast<Fuser::FN_FUSE2>(AWQ::fuse2),
+            reinterpret_cast<Fuser::FN_FUSE3>(AWQ::fuse3),
+            nullptr
+        };
+    }
+
+    static AWQ* fuse2(const core::Context& ctx, AWQ& a, AWQ& b) {
         auto dim_out = a.dim_out + b.dim_out;
         AWQ* ret = new AWQ(
             ctx, a.dim_in, dim_out, "", a.quant, a.dtype, a.parallel, a.dist_layout, a.group_size);
@@ -1634,16 +1705,44 @@ public:
         return ret;
     };
 
+    Fuser weight_fuser() const override {
+        return {
+            reinterpret_cast<Fuser::FN_FUSE2>(Fp8Block::fuse),
+            nullptr,
+            Fp8Block::fuse_dim0
+        };
+    }
+
     static Fp8Block* fuse(const core::Context& ctx, Fp8Block& a, Fp8Block& b) {
         uint32_t dim_out = a.dim_out + b.dim_out;
-        Fp8Block* ret = new Fp8Block(
+        auto* ret = new Fp8Block(
             ctx, a.dim_in, dim_out, a.act_fn_type, a.quant, a.dtype, a.parallel, a.dist_layout);
         ret->weight = concat2_dim0(ctx, a.weight, b.weight);
         ret->weight_scale = concat2_dim0(ctx, a.weight_scale, b.weight_scale);
         return ret;
     }
 
-    vector<Fp8Block*> split(const core::Context& ctx, size_t n_split, bool by_out) {
+    static impl* fuse_dim0(const core::Context& ctx, const std::vector<impl*>& layers) {
+        BM_ASSERT(!layers.empty(), "");
+        Fp8Block& a = *dynamic_cast<Fp8Block*>(layers[0]);
+        BM_ASSERT(!a.has_bias, "");
+        std::vector<Tensor*> all_scales;
+        std::vector<Tensor*> all_weights;
+        for (auto l: layers) {
+            Fp8Block* m = dynamic_cast<Fp8Block*>(l);
+            BM_ASSERT(m, "All sub layers impl type should be Fp8Block");
+            all_weights.push_back(&m->weight);
+            all_scales.push_back(&m->weight_scale);
+        }
+
+        auto* ret = new Fp8Block(
+            ctx, a.dim_in, a.dim_out, a.act_fn_type, a.quant, a.dtype, a.parallel, a.dist_layout);
+        ret->weight = concat_dim0(ctx, all_weights);
+        ret->weight_scale = concat_dim0(ctx, all_scales);
+        return ret;
+    }
+
+    vector<impl*> split(const core::Context& ctx, size_t n_split, bool by_out) override {
         BM_ASSERT(!has_bias, "");
         std::vector<Fp8Block*> results(n_split);
 
@@ -1672,7 +1771,7 @@ public:
                 results[i]->weight_scale = v_scales[i];
             }
         }
-        return results;
+        return *reinterpret_cast<vector<impl*>*>(&results);
     }
 
     void load_state_dict(
@@ -1885,127 +1984,59 @@ void Linear::load_state_dict(
 }
 
 Linear* Linear::fuse(const core::Context& ctx, Linear& q, Linear& k) {
-    unique_ptr<Linear> ret(new Linear());
-    auto gptq_ptr = dynamic_cast<impl::Int4GPTQ*>(q.pimpl.get());
-    auto awq_ptr = dynamic_cast<impl::AWQ*>(q.pimpl.get());
-    auto gptq2_ptr = dynamic_cast<impl::GPTQMarlin*>(q.pimpl.get());
-    auto fp8block = dynamic_cast<impl::Fp8Block*>(q.pimpl.get());
-    if (awq_ptr) {
-        auto k_ptr = dynamic_cast<impl::AWQ*>(k.pimpl.get());
-        auto fused_ptr = impl::AWQ::fuse(ctx, *awq_ptr, *k_ptr);
-        ret->pimpl = std::unique_ptr<impl>(fused_ptr);
-    } else if (gptq_ptr) {
-        auto k_ptr = dynamic_cast<impl::Int4GPTQ*>(k.pimpl.get());
-        if (!gptq_ptr->use_exllama || !k_ptr->use_exllama || gptq_ptr->act_order)
-            return nullptr;
-        auto a = impl::Int4GPTQ::fuse(ctx, *gptq_ptr, *k_ptr);
-        a->use_exllama = true;
-        ret->pimpl = std::unique_ptr<impl>(a);
-    } else if (gptq2_ptr) {
-        auto k_ptr = dynamic_cast<impl::GPTQMarlin*>(k.pimpl.get());
-        auto a = impl::GPTQMarlin::fuse(ctx, *gptq2_ptr, *k_ptr);
-        ret->pimpl = std::unique_ptr<impl>(a);
-    } else if (fp8block) {
-        auto k_ptr = dynamic_cast<impl::Fp8Block*>(k.pimpl.get());
-        auto a = impl::Fp8Block::fuse(ctx, *fp8block, *k_ptr);
-        ret->pimpl = std::unique_ptr<impl>(a);
-    } else if (q.pimpl->quant == 0) {
-        auto q_ptr = dynamic_cast<impl::NormalLinear*>(q.pimpl.get());
-        auto k_ptr = dynamic_cast<impl::NormalLinear*>(k.pimpl.get());
-        auto fused_ptr = impl::NormalLinear::fuse(ctx, *q_ptr, *k_ptr);
-        ret->pimpl = std::unique_ptr<impl>(fused_ptr);
-    } else {
-        return nullptr;
+    Linear::impl::Fuser fuser = q.pimpl->weight_fuser();
+    if (fuser.fuse2) {
+        auto a = fuser.fuse2(ctx, *q.pimpl.get(), *k.pimpl.get());
+        if (a) {
+            unique_ptr<Linear> ret(new Linear());
+            ret->pimpl = std::unique_ptr<impl>(a);
+            if (q.name == "w_in")
+                ret->name = "FUSE_ff_in";
+            return ret.release();
+        }
     }
-    if (!ret->pimpl) {
-        return nullptr;
-    }
-    if (q.name == "w_in")
-        ret->name = "FUSE_ff_in";
-    return ret.release();
+    return nullptr;
 }
 
 Linear* Linear::fuse(const core::Context& ctx, Linear& q, Linear& k, Linear& v) {
-    unique_ptr<Linear> ret(new Linear());
-    auto q8_ptr = dynamic_cast<impl::Int8Linear*>(q.pimpl.get());
-    auto gptq_ptr = dynamic_cast<impl::Int4GPTQ*>(q.pimpl.get());
-    auto awq_ptr = dynamic_cast<impl::AWQ*>(q.pimpl.get());
-    auto gptq2_ptr = dynamic_cast<impl::GPTQMarlin*>(q.pimpl.get());
-    if (q8_ptr) {
-        auto k_ptr = dynamic_cast<impl::Int8Linear*>(k.pimpl.get());
-        auto v_ptr = dynamic_cast<impl::Int8Linear*>(v.pimpl.get());
-        auto a = impl::Int8Linear::fuse(ctx, *q8_ptr, *k_ptr, *v_ptr);
-        ret->pimpl = std::unique_ptr<impl>(a);
-    } else if (awq_ptr) {
-        auto k_ptr = dynamic_cast<impl::AWQ*>(k.pimpl.get());
-        auto v_ptr = dynamic_cast<impl::AWQ*>(v.pimpl.get());
-        auto a = impl::AWQ::fuse3(ctx, *awq_ptr, *k_ptr, *v_ptr);
-        ret->pimpl = std::unique_ptr<impl>(a);
-    } else if (gptq_ptr) {
-        auto k_ptr = dynamic_cast<impl::Int4GPTQ*>(k.pimpl.get());
-        auto v_ptr = dynamic_cast<impl::Int4GPTQ*>(v.pimpl.get());
-        if (!gptq_ptr->use_exllama || !k_ptr->use_exllama || !v_ptr->use_exllama)
-            return nullptr;
-        auto a = impl::Int4GPTQ::fuse3(ctx, *gptq_ptr, *k_ptr, *v_ptr);
-        a->use_exllama = true;
-        ret->pimpl = std::unique_ptr<impl>(a);
-    } else if (gptq2_ptr) {
-        auto k_ptr = dynamic_cast<impl::GPTQMarlin*>(k.pimpl.get());
-        auto v_ptr = dynamic_cast<impl::GPTQMarlin*>(v.pimpl.get());
-        auto a = impl::GPTQMarlin::fuse3(ctx, *gptq2_ptr, *k_ptr, *v_ptr);
-        ret->pimpl = std::unique_ptr<impl>(a);
-    } else if (q.pimpl->quant == 0) {
-        auto q_ptr = dynamic_cast<impl::NormalLinear*>(q.pimpl.get());
-        auto k_ptr = dynamic_cast<impl::NormalLinear*>(k.pimpl.get());
-        auto v_ptr = dynamic_cast<impl::NormalLinear*>(v.pimpl.get());
-        auto a = impl::NormalLinear::fuse(ctx, *q_ptr, *k_ptr, *v_ptr);
-        ret->pimpl = std::unique_ptr<impl>(a);
-    } else {
-        return nullptr;
+    Linear::impl::Fuser fuser = q.pimpl->weight_fuser();
+    if (fuser.fuse3) {
+        auto a = fuser.fuse3(ctx, *q.pimpl.get(), *k.pimpl.get(), *v.pimpl.get());
+        if (a) {
+            unique_ptr<Linear> ret(new Linear());
+            ret->pimpl = std::unique_ptr<impl>(a);
+            if (q.name == "project_q")
+                ret->name = "FUSE_project_qkv";
+            return ret.release();
+        }
     }
-    if (q.name == "project_q")
-        ret->name = "FUSE_project_qkv";
-    return ret.release();
+    return nullptr;
 }
 
 Linear* Linear::fuse(const core::Context& ctx, const std::vector<Linear*>& layers) {
-    unique_ptr<Linear> ret(new Linear());
     BM_ASSERT(!layers.empty(), "no layers");
-    auto gptq_ptr = dynamic_cast<impl::Int4GPTQ*>(layers[0]->pimpl.get());
-    if (gptq_ptr) {
-        std::vector<impl::Int4GPTQ*> vec;
+    Linear::impl::Fuser fuser = layers[0]->pimpl->weight_fuser();
+    if (fuser.fuse_dim0) {
+        std::vector<impl*> vec;
         for (auto layer: layers) {
-            vec.push_back(dynamic_cast<impl::Int4GPTQ*>(layer->pimpl.get()));
+            vec.push_back(layer->pimpl.get());
         }
-        auto a = impl::Int4GPTQ::fuse_dim0(ctx, vec);
+        unique_ptr<Linear> ret(new Linear());
+        auto a = fuser.fuse_dim0(ctx, vec);
         ret->pimpl = std::unique_ptr<impl>(a);
-    } else {
-        return nullptr;
+        return ret.release();
     }
-    return ret.release();
+    return nullptr;
 }
 
 std::vector<Linear*> Linear::split(const core::Context& ctx, size_t n_split, bool dim_out) {
     std::vector<Linear*> results;
-    auto ptr = dynamic_cast<impl::Int4GPTQ*>(pimpl.get());
-    if (ptr) {
-        auto impls = ptr->split(ctx, n_split, dim_out);
-        for (auto a : impls) {
-            Linear* linear = new Linear();
-            linear->pimpl = std::unique_ptr<impl>(a);
-            linear->name = name;
-            results.push_back(linear);
-        }
-    }
-    auto fp8b_ptr = dynamic_cast<impl::Fp8Block*>(pimpl.get());
-    if (fp8b_ptr) {
-        auto impls = fp8b_ptr->split(ctx, n_split, dim_out);
-        for (auto a : impls) {
-            Linear* linear = new Linear();
-            linear->pimpl = std::unique_ptr<impl>(a);
-            linear->name = name;
-            results.push_back(linear);
-        }
+    auto impls = pimpl->split(ctx, n_split, dim_out);
+    for (auto a : impls) {
+        Linear* linear = new Linear();
+        linear->pimpl = std::unique_ptr<impl>(a);
+        linear->name = name;
+        results.push_back(linear);
     }
     return results;
 }
