@@ -40,4 +40,4 @@ prompts = [
 with DynamicBatchGenerator(dyn_config, model) as generator:
     results = generator.batch_generate(prompts, arg)
     for i in range(len(prompts)):
-        print(f"{prompts[i]} => {results[0].outputs[0].text}")
+        print(f"{prompts[i]} => {results[i].outputs[0].text}")
