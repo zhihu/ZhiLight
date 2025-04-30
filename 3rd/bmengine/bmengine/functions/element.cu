@@ -217,6 +217,31 @@ void check_numeric(const core::Context& ctx, const core::Tensor& tensor) {
 }
 
 template<typename T>
+static __global__ void KERNEL_check_equal(size_t last_dim, const T* a, const T* b) {
+    size_t idx = size_t(blockIdx.y) * blockDim.x + threadIdx.x;
+    if (idx < last_dim) {
+        size_t offset = size_t(blockIdx.x) * last_dim + idx;
+        assert(a[offset] == b[offset]);
+    }
+}
+
+void check_equal(const core::Context& ctx, const core::Tensor& a, const core::Tensor& b) {
+    BM_ASSERT_EQ(a.dtype(), b.dtype(), "a, b have different dtype.");
+    BM_ASSERT_EQ(a.shape(), b.shape(), "a, b have different shapes.");
+    size_t last_dim = a.size(-1);
+    size_t threads = round_up_thread(last_dim);
+    dim3 gridDim(a.numel() / last_dim, round_up(last_dim, threads) / threads);
+
+    auto stream = ctx.current_stream()->ptr;
+    BM_DTYPE_DISPATCH_FLOAT(a.dtype(), {
+        KERNEL_check_equal<scalar_t><<<gridDim, threads, 0, stream>>>(
+            last_dim, a.data<scalar_t>(), b.data<scalar_t>());
+    });
+    BM_CUDART_ASSERT(cudaStreamSynchronize(stream));
+    BM_CUDART_ASSERT(cudaGetLastError());
+}
+
+template<typename T>
 struct UnaryOpPow {
     float exp;
     explicit __host__ __device__ UnaryOpPow(float exp) : exp(exp) { }
