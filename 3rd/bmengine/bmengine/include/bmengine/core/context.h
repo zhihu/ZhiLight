@@ -65,6 +65,7 @@ public:
 
     Stream current_stream() const;
     void set_current_stream(Stream s);
+    cudaStream_t current_cuda_stream() const;
     ncclComm_t current_comm() const;
     Stream get_stream() const;
     cublasHandle_t cublas_handle() const;

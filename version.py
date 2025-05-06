@@ -6,7 +6,7 @@ import re
 # 发版改这里的版本号, 会自动打tag & 自动编译py3.7～3.10的 wheel package 到 指定pypi服务器
 # 默认 MR 和 Master 不发版情况下，只做py310的编译过程, 每个 MR 都跑 py3.7～3.10 的编译过程的话，速度会比较慢
 # zhilight release version
-__version__ = "0.4.17"
+__version__ = "0.4.18"
 
 ##########################
 

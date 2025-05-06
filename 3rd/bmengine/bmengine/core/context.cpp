@@ -587,6 +587,9 @@ int Context::get_max_shared_memory() const {
 Stream Context::current_stream() const {
     return pimpl->current_stream();
 }
+cudaStream_t Context::current_cuda_stream() const {
+    return pimpl->cur_dev_handle()->stream;
+}
 void Context::set_current_stream(Stream s) {
     pimpl->set_current_stream(s);
 }
