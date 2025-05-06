@@ -89,8 +89,8 @@ Tensor concat_dim0(const core::Context& ctx, std::vector<Tensor*> tensors, bool 
     return ret;
 }
 static Tensor concat2_dim0(const core::Context& ctx, Tensor& a, Tensor& b) {
-    BM_ASSERT_EQ(a.shape(), b.shape(), "shape mismatch");
-    if (a.empty()) return {};
+//    BM_ASSERT_EQ(a.shape(), b.shape(), "shape mismatch");
+    if (a.empty()) return b;
     return concat_dim0(ctx, {&a, &b}, false);
 }
 static Tensor concat3_dim0(const core::Context& ctx, Tensor& q, Tensor& k, Tensor& v) {
@@ -1791,7 +1791,7 @@ public:
         bool quant_back,
         Tensor* output
     ) override {
-        int ev_level = ctx.rank() == 0 && ctx.current_layer() == 300 ? 0 : 2;
+        int ev_level = ctx.is_layer(300) ? 0 : 2;
         size_t m = input.size(0);
         size_t k = input.size(1);
         size_t n = weight.size(0);
@@ -1821,6 +1821,50 @@ public:
             m, n, k,
             64,
             1
+        );
+        if (ret_code == -1) {
+            throw std::runtime_error(logger::str_cat("Unsupported shape N=", weight.size(0), ", K=", weight.size(1)));
+        }
+
+        return activate(ctx, ret);
+    }
+
+    core::Tensor grouped_gemm(
+        const core::Context& ctx,
+        const core::Tensor& input,
+        const core::Tensor& m_indices,
+        int num_groups) {
+        BM_ASSERT_EQ(weight.ndim(), 3, "weight should be a fused 3D tensor");
+        int ev_level = ctx.is_layer(300) ? 0 : 2;
+        size_t m = input.size(0);
+        size_t k = input.size(1);
+        size_t n = weight.size(1);
+//        if (ctx.is_layer(3)) std::cout << "weight: " << weight.shape() << endl;
+        string ev_name = logger::str_cat("[M=", m, "] FP8Block::grouped_gemm ", prefix);
+        core::EventScope ev_scope(ctx, ev_name, ev_level);
+
+        auto& a_quant = input.quant_scale;
+        if (!a_quant) {
+            const_cast<Tensor&>(input).quant_scale = std::make_shared<core::Tensor>();
+            ctx.recordEvent("dynamic_scaled_quant", ev_level);
+            *a_quant = nn::fp8::per_token_cast_to_fp8(ctx, input);
+        } else {
+            BM_ASSERT_EQ(a_quant->dtype(), core::DataType::kFP8_E4M3, "Wrong fp8 dtype");
+        }
+
+        ctx.recordEvent("gemm_fp8_block", ev_level);
+        Tensor ret = ctx.tensor({m, n}, dtype);
+        int ret_code = deep_gemm_fp8_block_h20_group(
+            a_quant->data(),
+            a_quant->quant_scale->data(),
+            weight.data(),
+            weight_scale.data(),
+            ret.data(),
+            m_indices.data<int>(),
+            ctx.current_stream()->ptr,
+            m, n, k,
+            64,
+            num_groups
         );
         if (ret_code == -1) {
             throw std::runtime_error(logger::str_cat("Unsupported shape N=", weight.size(0), ", K=", weight.size(1)));
@@ -2071,5 +2115,15 @@ void Linear::dequant_cache_weight(core::Context& ctx, const core::Tensor& fake_i
     if (gptq_ptr && m_ctx) {
         gptq_ptr->dequant_cache_weight(*m_ctx, fake_input);
     }
+}
+
+core::Tensor Linear::grouped_gemm_fp8_block(
+    const core::Context& ctx,
+    const core::Tensor& input,
+    const core::Tensor& m_indices,
+    int num_groups) {
+    auto ptr = dynamic_cast<impl::Fp8Block*>(pimpl.get());
+    BM_ASSERT(ptr, "Not Fp8Block impl");
+    return ptr->grouped_gemm(ctx, input, m_indices, num_groups);
 }
 }
