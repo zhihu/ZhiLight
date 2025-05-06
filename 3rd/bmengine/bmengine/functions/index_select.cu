@@ -1,4 +1,5 @@
 #include "bmengine/functions/index_select.h"
+#include "bmengine/logger/std_log_op.hpp"
 #include "private/tensor_ops.h"
 #include <assert.h>
 
@@ -33,7 +34,8 @@ core::Tensor index_select(
     const core::Context& ctx,
     const core::Tensor& input,
     int dim,
-    const core::Tensor& index // the 1-D tensor containing the indices to index
+    const core::Tensor& index,  // the 1-D tensor containing the indices to index
+    core::Tensor* out_ptr
 ) {
     auto shape = input.shape();
     int rank = int(shape.size());
@@ -45,7 +47,10 @@ core::Tensor index_select(
 
     std::vector<size_t> out_shape = shape;
     out_shape[dim] = M_new;
-    core::Tensor out = ctx.tensor(out_shape, input.dtype());
+    if (out_ptr) {
+        BM_ASSERT_EQ(out_ptr->shape(), out_shape, "shape mismatch");
+    }
+    core::Tensor out = out_ptr ? *out_ptr : ctx.tensor(out_shape, input.dtype());
 
     auto stream = ctx.current_stream()->ptr;
 

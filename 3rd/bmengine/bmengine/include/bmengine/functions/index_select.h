@@ -9,7 +9,8 @@ core::Tensor index_select(
     const core::Context& ctx,
     const core::Tensor& input,
     int dim,
-    const core::Tensor& index // the 1-D tensor containing the indices to index
+    const core::Tensor& index,  // the 1-D tensor containing the indices to index
+    core::Tensor* out = nullptr
 );
 
 // analog with torch.take_along_dim() without broadcast, dims < dim
