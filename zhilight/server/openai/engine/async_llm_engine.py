@@ -217,13 +217,14 @@ class AsyncLLMEngine:
             current_iter_time = time.time()
             iter_cost = current_iter_time - last_iter_time
             if first:
-                stats.first_token_time = iter_cost
+                stats.first_token_time = current_iter_time
+                stats.first_scheduled_time = handler.task.get_first_schedule_ts() * 1e-6 
+                stats.time_in_queue = handler.task.get_time_in_queuegs() * 1e-6
                 stats.input_tokens_num = handler.input_tokens_num
                 first = False
-            else:
-                stats.first_token_time = None
             stats.output_tokens_num = sum(handler.output_tokens_nums)
             if output[0] == StreamResultType.Final:
+                stats.finished_time = time.time()
                 finished = True
             else:
                 stats.last_token_time = iter_cost
