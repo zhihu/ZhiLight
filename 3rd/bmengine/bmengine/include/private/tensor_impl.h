@@ -56,10 +56,12 @@ public:
     std::unique_ptr<TensorImpl> view(const std::vector<size_t>& size) const;
     std::unique_ptr<TensorImpl> view_unchecked(const std::vector<size_t>& size, DataType dtype) const;
     std::unique_ptr<TensorImpl> view_type(const std::vector<size_t>& size, DataType dtype, bool check_size = true) const;
+    std::unique_ptr<TensorImpl> view_uncontinuous(const std::vector<size_t>& size, DataType dtype) const;
     std::vector<std::unique_ptr<TensorImpl>> chunk() const;
     std::unique_ptr<TensorImpl> index_dim0(size_t i) const;
     std::unique_ptr<TensorImpl> slice_dim0(size_t from, size_t to) const;
     std::unique_ptr<TensorImpl> virtual_slice(size_t from, size_t to, int dim) const;
+    bool is_continuous() const;
 
     std::string info(int level = 0) const;
     long get_mem_use_count() const { return mem.use_count(); }

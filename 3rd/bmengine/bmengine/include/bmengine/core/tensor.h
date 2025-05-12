@@ -85,6 +85,8 @@ public:
     Tensor view(const std::vector<size_t>& size) const;
     Tensor view_unchecked(const std::vector<size_t>& size, DataType dtype) const;
     Tensor view_type(const std::vector<size_t>& size, DataType dtype) const;
+    Tensor view_uncontinuous(const std::vector<size_t>& size) const;
+
     Tensor index_dim0(size_t i) const;
     Tensor slice_dim0(size_t from, size_t to) const;
     Tensor slice_dim0_len(size_t from, size_t len) const {

@@ -89,6 +89,13 @@ public:
         const std::map<std::string, const Tensor>& state_dict,
         bool parallel,
         DistLayout layout) const;
+    void load_parameter_part(
+        Tensor* weight,
+        const std::string& name,
+        const std::map<std::string, const Tensor>& state_dict,
+        DistLayout layout,
+        size_t part,
+        size_t total) const;
 
     // cache tensor to active_device() if active_device() is different from tensor
     const Tensor* identity(const Tensor* tensor, const std::string& name) const;

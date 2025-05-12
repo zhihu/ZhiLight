@@ -98,15 +98,37 @@ int TensorImpl::device() const {
     return mem->dev;
 }
 
+std::unique_ptr<TensorImpl> TensorImpl::view_uncontinuous(const std::vector<size_t>& shape, DataType dtype) const {
+    // handle ONLY if strides[0] is not continuous
+    bool valid0 = false;
+    if (ndim() == 2 && strides[1] == 1) {
+        // from 2D to 3D
+        if (shape.size() == 3 && shape[0] == shape_[0]) {  // shape[1] * shape[2] == shape_[1]
+            valid0 = true;
+        }
+    } else if (ndim() == 3 && strides[1] == shape_[2] && strides[2] == 1) {
+        // from 3D to 2D
+        if (shape.size() == 2 && shape[0] == shape_[0]) {  // shape[1] == shape_[1] * shape_[2]
+            valid0 = true;
+        }
+    }
+    if (valid0) {
+        auto ret = std::make_unique<TensorImpl>(shape, mem, offset, dtype);
+        ret->strides[0] = strides[0];  // preserve strides[0]
+        return std::move(ret);
+    }
+    throw std::runtime_error("Can't perform view on an un-continuous tensor.");
+}
+
 std::unique_ptr<TensorImpl> TensorImpl::view_type(const std::vector<size_t>& size, DataType dtype, bool check_size) const {
-    // TODO: check continuous
+    BM_ASSERT(is_continuous(), "Tensor isn't continuous, call view_uncontinuous()");
     BM_ASSERT(numel() > 0, "Tensor is empty");
-    size_t total_size = 1;
+    size_t num_element = 1;
     for (auto s : size) {
-        total_size *= s;
+        num_element *= s;
     }
     if (check_size) {
-        BM_ASSERT_EQ(total_size * get_elem_size(dtype), nbytes_, "Tensor size mismatch");
+        BM_ASSERT_EQ(num_element * get_elem_size(dtype), nbytes_, "Tensor size mismatch");
     }
     return std::move(std::make_unique<TensorImpl>(size, mem, offset, dtype));
 }
@@ -160,6 +182,15 @@ std::unique_ptr<TensorImpl> TensorImpl::virtual_slice(
         new_size, mem, offset + stride_bytes(dim) * from, dtype_);
     ret->strides = this->strides; // use same storage
     return std::move(ret);
+}
+bool TensorImpl::is_continuous() const {
+    return strides[0] * shape_[0] == numel_;
+//    size_t all_strides = numel_;
+//    for (size_t i = 0; i < shape_.size(); ++i) {
+//        all_strides /= shape_[i];
+//        if (all_strides != strides[i]) return false;
+//    }
+//    return true;
 }
 
 std::string TensorImpl::info(int level) const {

@@ -55,6 +55,11 @@ Tensor Tensor::view_type(const std::vector<size_t>& size, DataType dtype) const 
     return Tensor(pimpl_->view_type(size, dtype));
 }
 
+Tensor Tensor::view_uncontinuous(const std::vector<size_t>& size) const {
+    BM_ASSERT(pimpl() != nullptr, "Tensor is empty");
+    return Tensor(pimpl_->view_uncontinuous(size, dtype()));
+}
+
 void Tensor::from_buffer(const void* ptr, bool async, cudaStream_t stream) {
     BM_CUDART_ASSERT(cudaMemcpyAsync(mutable_data(), ptr, nbytes(), cudaMemcpyHostToDevice, stream));
     if (!async) {

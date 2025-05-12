@@ -710,28 +710,36 @@ void Context::load_parameter(
         std::cout << "Load " << name << ", shape=" << weight->shape() << ", srcShape=" << param.shape() << endl;
     }
     BM_ASSERT_EQ(weight->shape(), param.shape(), name +" shape mismatch");
-//    if (get_compute_capability() == 80) {
-//        if (rank() == 0)
-//            assign_or_copy(weight, &param);
-//        *weight = distribute_parameter(*weight, layout);
-//        return;
-//    }
     if (!parallel || world_size() == 1 || layout == DistLayout::REPLICATED) {
         assign_or_copy(weight, &param);
         weight->set_name(name);
         return;
     }
+    load_parameter_part(weight, name, state_dict, layout, rank(), world_size());
+}
+
+void Context::load_parameter_part(
+    Tensor* weight,
+    const std::string& name,
+    const std::map<std::string, const Tensor>& state_dict,
+    DistLayout layout,
+    size_t part_idx,
+    size_t total_part) const {
+    auto it = state_dict.find(name);
+    BM_ASSERT(it != state_dict.end(), "param " + name + " not found in state_dict");
+    auto& param = it->second;
+
     auto shape = weight->shape();
     size_t shard_dim = shape.size() - (layout == DistLayout::ROW ? 2 : 1);
-    BM_ASSERT(shape[shard_dim] % world_size() == 0, "size can't be divided by world_size");
-    shape[shard_dim] /= world_size();
+    BM_ASSERT(shape[shard_dim] % total_part == 0, "size can't be divided by world_size");
+    shape[shard_dim] /= total_part;
     size_t shard_len = shape[shard_dim];
     *weight = tensor(shape, weight->dtype());
     weight->set_name(name);
 
     // case 1: ROW layout, copy directly
     if (shard_dim == 0) {
-        auto part = param.slice_dim0_len(rank() * shard_len, shard_len);
+        auto part = param.slice_dim0_len(part_idx * shard_len, shard_len);
         assign_or_copy(weight, &part);
         return;
     }
@@ -749,8 +757,8 @@ void Context::load_parameter(
         buf = new char[weight->nbytes()];
     }
     size_t shard_bytes = shard_len * get_elem_size(weight->dtype());
-    size_t row_bytes = shard_bytes * world_size();
-    size_t col_offset = rank() * shard_bytes;
+    size_t row_bytes = shard_bytes * total_part;
+    size_t col_offset = part_idx * shard_bytes;
     size_t num_row = weight->size(0);
     for (int i = 0; i < num_row; ++i) {
         char* dst = buf + i * shard_bytes;
