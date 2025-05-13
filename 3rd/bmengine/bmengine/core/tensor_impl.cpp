@@ -183,14 +183,27 @@ std::unique_ptr<TensorImpl> TensorImpl::virtual_slice(
     ret->strides = this->strides; // use same storage
     return std::move(ret);
 }
+
+std::unique_ptr<TensorImpl> TensorImpl::virtual_transpose(int dim0, int dim1) const {
+    auto new_size = size();
+    std::swap(new_size[dim0], new_size[dim1]);
+
+    auto ret = std::make_unique<TensorImpl>(new_size, mem, offset, dtype_);
+
+    ret->strides[dim0] = stride(dim1);
+    ret->strides[dim1] = stride(dim0);
+
+    return std::move(ret);
+}
+
 bool TensorImpl::is_continuous() const {
-    return strides[0] * shape_[0] == numel_;
-//    size_t all_strides = numel_;
-//    for (size_t i = 0; i < shape_.size(); ++i) {
-//        all_strides /= shape_[i];
-//        if (all_strides != strides[i]) return false;
-//    }
-//    return true;
+//    return strides[0] * shape_[0] == numel_;
+    size_t all_strides = numel_;
+    for (size_t i = 0; i < shape_.size(); ++i) {
+        all_strides /= shape_[i];
+        if (all_strides != strides[i]) return false;
+    }
+    return true;
 }
 
 std::string TensorImpl::info(int level) const {

@@ -167,7 +167,17 @@ Tensor Tensor::slice_dim0(size_t from, size_t to) const {
 }
 
 Tensor Tensor::virtual_slice(size_t from, size_t len, int dim) const {
-    return Tensor(dynamic_cast<TensorImpl*>(pimpl())->virtual_slice(from, len, dim));
+    return Tensor(pimpl()->virtual_slice(from, len, dim));
+}
+
+Tensor Tensor::virtual_transpose(int dim0, int dim1) const {
+    dim0 = normalize_dim(dim0);
+    dim1 = normalize_dim(dim1);
+    return Tensor(pimpl()->virtual_transpose(dim0, dim1));
+}
+
+bool Tensor::is_continuous() const {
+    return pimpl()->is_continuous();
 }
 
 Tensor Tensor::squeeze() const {
