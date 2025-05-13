@@ -105,6 +105,14 @@ public:
 
     py::object get_result(float timeout);
 
+    long get_first_schedule_ts() {
+        return task_->begin_ts;
+    }
+    
+    long get_time_in_queue() {
+        return task_->begin_ts - enqueue_ts;
+    }
+
     void cancel() {
         task_->canceled = true;
     }
@@ -307,6 +315,8 @@ void define_dynamic_batch(py::module_& m) {
     py::class_<PySearchTask, shared_ptr<PySearchTask>>(m, "SearchTask")
         .def("has_result", &PySearchTask::has_result)
         .def("get_result", &PySearchTask::get_result)
+        .def("get_time_in_queue", &PySearchTask::get_time_in_queue)
+        .def("get_first_schedule_ts", &PySearchTask::get_first_schedule_ts)
         .def("input_tokens_num", &PySearchTask::input_tokens_num)
         .def("output_tokens_nums", &PySearchTask::output_tokens_nums)
         .def("cancel", &PySearchTask::cancel)

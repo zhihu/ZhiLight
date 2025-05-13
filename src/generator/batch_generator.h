@@ -123,7 +123,7 @@ class BatchGenerator {
     bmengine::core::Engine* engine_;
 
     TaskQueue queue_;
-    int active_size_;
+    int active_size_ { 0 };
 
     shared_ptr<std::thread> thread_;
     volatile bool stopping_ { false };
