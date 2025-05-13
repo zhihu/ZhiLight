@@ -33,6 +33,13 @@ class Gemm : public core::Layer {
         core::Tensor* output = nullptr,
         const core::Tensor* bias = nullptr
     );
+
+    core::Tensor batch_3d(
+        const core::Context& ctx,
+        const core::Tensor& A,
+        const core::Tensor& B,
+        core::Tensor* output = nullptr
+    );
 };
 
 } // namespace functions

@@ -61,6 +61,7 @@ public:
     std::unique_ptr<TensorImpl> index_dim0(size_t i) const;
     std::unique_ptr<TensorImpl> slice_dim0(size_t from, size_t to) const;
     std::unique_ptr<TensorImpl> virtual_slice(size_t from, size_t to, int dim) const;
+    std::unique_ptr<TensorImpl> virtual_transpose(int dim0, int dim1) const;
     bool is_continuous() const;
 
     std::string info(int level = 0) const;

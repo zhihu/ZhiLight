@@ -94,6 +94,8 @@ public:
     }
     // Note: After slice, the storage is no longer continuous!!!
     Tensor virtual_slice(size_t from, size_t len, int dim = -1) const;
+    Tensor virtual_transpose(int dim0, int dim1) const;
+    bool is_continuous() const;
     std::vector<Tensor> chunk() const;
     Tensor squeeze() const;
 

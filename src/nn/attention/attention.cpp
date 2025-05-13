@@ -162,6 +162,14 @@ public:
         const Tensor& placement_s,
         Tensor& attn_value_s);
 
+    void attn_search_rag_naive(
+        model::ModelContext& ctx,
+        const Tensor& h_q,
+        const Tensor& h_k_s,
+        const Tensor& h_v_s,
+        const Tensor& placement_s,
+        Tensor& attn_value_s);
+
     Tensor mul_q_k_no_batch(
         model::ModelContext& ctx,
         const Tensor& q_trans, // (batch, num_kv_heads, num_head_groups * len_q, dim_head)
@@ -664,15 +672,15 @@ void Attention::impl::NormalImpl::attn_search_rag(
         auto batch_v = buf_v_addr.view_unchecked({dyn_batch->total_k, num_kv_heads, dim_head}, h_v_s.dtype());
         auto fa_out = attn_value_search.view({batch * len_q, num_heads, dim_head});
         flash_decoding(ctx,
-                    batch_q,
-                    batch_k,
-                    batch_v,
-                    &fa_out,
-                    &dyn_batch->cu_q_seqlens,
-                    &dyn_batch->cu_k_seqlens,
-                    dyn_batch->max_q_seqlen,
-                    dyn_batch->max_k_seqlen,
-                    true);
+                       batch_q,
+                       batch_k,
+                       batch_v,
+                       &fa_out,
+                       &dyn_batch->cu_q_seqlens,
+                       &dyn_batch->cu_k_seqlens,
+                       dyn_batch->max_q_seqlen,
+                       dyn_batch->max_k_seqlen,
+                       true);
         return;
     }
 
@@ -720,9 +728,29 @@ void Attention::impl::NormalImpl::attn_search_rag(
     }
     gc_stopper.reset();
 
+    attn_search_rag_naive(ctx, h_q_s, h_k_s, h_v_s, placement_s, attn_value_search);
+}
+
+// OLD implementation without flash-attn and fused kernel.
+void Attention::impl::NormalImpl::attn_search_rag_naive(
+        model::ModelContext& ctx,
+        const Tensor& h_q,
+        const Tensor& h_k_s,
+        const Tensor& h_v_s,
+        const Tensor& placement_s,
+        Tensor& attn_value_search) {
+    model::DynBatchContext *dyn_batch = ctx.dyn_batch().get();
+    RagBufferContext *rag_buffer = ctx.rag_buffer().get();
+    int layer = ctx.current_layer();
+    int event_level = get_event_level(ctx) + 10;
+    size_t batch = h_q.size(0);
+    size_t len_q = h_k_s.size(1);
+    size_t sum_of_len_buf = dyn_batch->sum_len_buf();
+    int max_len_buf = dyn_batch->get_max_len_buf();
+
     auto h_q_t = transpose_q(ctx, h_q, len_q, event_level)
         .view({ batch, num_kv_heads, num_head_groups * len_q, dim_head });
-    auto h_q_chunk = h_q_t.chunk();
+    auto h_q_chunk = h_q_t.chunk();  // batch => (num_kv_heads, num_head_groups * len_q, dim_head)
     auto attn_value_chunk = attn_value_search.chunk();
 
     // case3: attention of ragged kv buffer with multiple streams
@@ -742,7 +770,7 @@ void Attention::impl::NormalImpl::attn_search_rag(
     }
     BM_CUDART_ASSERT(cudaEventDestroy(main_event));
 
-    vector<Tensor> attn_scores(batch);
+    vector<Tensor> attn_scores(batch);  // (num_kv_heads, num_head_groups * len_q, len_buf)
     vector<Tensor> attn_results(batch);
     // Do attention of each task in a separate stream
     for (size_t i = 0; i < batch; ++i) {
@@ -750,12 +778,18 @@ void Attention::impl::NormalImpl::attn_search_rag(
         ctx.set_current_stream(cur_stream);
         BM_ASSERT_EQ(uint64_t(cur_stream->ptr), uint64_t(ctx.current_stream()->ptr), "Wrong stream");
 
-        Tensor key_buf = rag_buffer->buf_k(i, layer);
-        Tensor val_buf = rag_buffer->buf_v(i, layer);
+        Tensor key_buf = rag_buffer->buf_k(i, layer);  // Normal: (num_kv_heads, len_buf, dim_head)
+        Tensor val_buf = rag_buffer->buf_v(i, layer);  // BSHD: (len_buf, num_kv_heads, dim_head)
+        if (ctx.is_BSHD()) {
+            // Transpose to (num_kv_heads, len_buf, dim_head)
+            key_buf = key_buf.virtual_transpose(0, 1);
+            val_buf = val_buf.virtual_transpose(0, 1);
+        }
         size_t len_buf = key_buf.size(-2);
         // Q * K
         ctx.recordEvent("Q * K", event_level);
-        attn_scores[i] = gemm_transB.forward(ctx, h_q_chunk[i], key_buf);
+        // h_q_chunk[i]: (num_kv_heads, num_head_groups * len_q, dim_head)
+        attn_scores[i] = gemm_transB.batch_3d(ctx, h_q_chunk[i], key_buf);
 
         // attn_softmax in-place update attn_score
         Tensor attn_score_q = attn_scores[i].view({ num_heads, len_q, len_buf });
@@ -765,12 +799,12 @@ void Attention::impl::NormalImpl::attn_search_rag(
         attn_softmax(ctx, attn_scale, attn_score_q, mask, pos_bias);
 
         // Score * V
-        ctx.recordEvent("Score*V", event_level);
+        ctx.recordEvent("Score*V", event_level, 2UL * attn_scores[i].numel() * dim_head);
         Tensor tmp = attn_value_chunk[i].view({num_kv_heads, num_head_groups * len_q, dim_head});
-        attn_results[i] = gemm_score_v(
+        attn_results[i] = gemm_score_v.batch_3d(
             ctx,
-            attn_scores[i],
-            val_buf,
+            attn_scores[i],  // (num_kv_heads, num_head_groups * len_q, len_buf)
+            val_buf,         // (num_kv_heads, len_buf, dim_head)
             len_q > 1 ? nullptr : &tmp);
 
         if (len_q > 1) {
@@ -792,6 +826,7 @@ void Attention::impl::NormalImpl::attn_search_rag(
     }
     // BM_CUDART_ASSERT(cudaDeviceSynchronize());
 }
+
 Tensor Attention::impl::NormalImpl::dynamic_batch_forward(
     model::ModelContext& ctx,
     const Tensor& hidden_q,  // (group_len_q, dim_model)

@@ -371,7 +371,7 @@ public:
 
         uint32_t batch_A = A.size(0);
         uint32_t batch_B = (B.ndim() <= 2) ? 1 : B.size(0);
-        uint32_t batch_count = std::max(batch_A, batch_B);
+        uint32_t batch_count = std::max(batch_A, batch_B);  // buggy here
         int64_t stride_A = (A.size(0) == 1) ? 0 : A.stride(0);
         int64_t stride_B = (B.ndim() <= 2) ? 0 : B.stride(0);
         int64_t stride_C = M * N;
@@ -433,6 +433,73 @@ public:
         BM_CUBLAS_ASSERT(cublasLtMatmulDescDestroy(matmul_desc));
         return ret;
     }
+
+    static void set_batch_layout(cublasLtMatrixLayout_t layout, uint32_t batch, int64_t stride) {
+        BM_CUBLAS_ASSERT(cublasLtMatrixLayoutSetAttribute(
+            layout, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batch, sizeof(batch)));
+        BM_CUBLAS_ASSERT(cublasLtMatrixLayoutSetAttribute(
+            layout, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &stride, sizeof(stride)));
+    }
+
+    core::Tensor batch_3d(
+        const core::Context& ctx,
+        const core::Tensor& A,
+        const core::Tensor& B,
+        core::Tensor* output) {
+        size_t batch = A.size(0);
+        size_t M = A.size(transA ? -1 : -2);
+        size_t K1 = A.size(transA ? -2 : -1);
+        size_t N = B.size(transB ? -2 : -1);
+        size_t K2 = B.size(transB ? -1 : -2);
+        BM_ASSERT_EQ(K1, K2, "Matrix K1, K2 mismatch");
+
+        std::vector<size_t> c_shape = {batch, M, N};
+        if (output) {
+            BM_ASSERT_EQ(c_shape, output->shape(), "shape mismatch");
+        }
+        const core::Tensor& ret = (output != nullptr) ? *output : ctx.tensor(c_shape, data_type);
+
+        cublasLtMatmulDesc_t matmul_desc = create_desc();
+        cublasLtMatrixLayout_t layout_A, layout_B, layout_C;
+        BM_CUBLAS_ASSERT(
+            cublasLtMatrixLayoutCreate(&layout_A, in_type, A.size(-1), A.size(-2), A.stride(-2)));
+
+        BM_CUBLAS_ASSERT(
+            cublasLtMatrixLayoutCreate(&layout_B, in_type, B.size(-1), B.size(-2), B.stride(-2)));
+
+        BM_CUBLAS_ASSERT(cublasLtMatrixLayoutCreate(&layout_C, out_type, N, M, ret.stride(-2)));
+
+        set_batch_layout(layout_A, batch, A.stride(0));
+        set_batch_layout(layout_B, batch, B.stride(0));
+        set_batch_layout(layout_C, batch, ret.stride(0));
+
+        const void *p_alpha, *p_beta;
+        get_scale(p_alpha, p_beta);
+
+        BM_CUBLAS_ASSERT(cublasLtMatmul(
+            ctx.current_cublas_handle(),
+            matmul_desc,
+            p_alpha,
+            B.data(),
+            layout_B,
+            A.data(),
+            layout_A,
+            p_beta,
+            ret.data(),
+            layout_C,
+            ret.data(),
+            layout_C,
+            algo_found ? &algo : nullptr,
+            nullptr,
+            0,
+            ctx.current_cuda_stream()));
+
+        BM_CUBLAS_ASSERT(cublasLtMatrixLayoutDestroy(layout_A));
+        BM_CUBLAS_ASSERT(cublasLtMatrixLayoutDestroy(layout_B));
+        BM_CUBLAS_ASSERT(cublasLtMatrixLayoutDestroy(layout_C));
+        BM_CUBLAS_ASSERT(cublasLtMatmulDescDestroy(matmul_desc));
+        return ret;
+    }
 };
 
 Gemm::Gemm(const core::Context& ctx, core::DataType dtype, bool transA, bool transB, float alpha)
@@ -471,6 +538,39 @@ core::Tensor Gemm::forward(
         return pimpl->gemm(ctx, A, B, output, bias);
     } else {
         return pimpl->gemm_batched(ctx, A, B, output);
+    }
+}
+
+core::Tensor Gemm::batch_3d(
+    const core::Context& ctx, const Tensor& A, const Tensor& B, Tensor* output) {
+    pimpl->prefix = prefix;
+    BM_ASSERT_EQ(A.ndim(), 3, "MatrixA is not 3D");
+    BM_ASSERT_EQ(B.ndim(), 3, "MatrixB is not 3D");
+    BM_ASSERT_EQ(A.size(0), B.size(0), "Matrix batch=size(0) mismatch");
+    if (output) {
+        BM_ASSERT_EQ(output->ndim(), 3, "MatrixD is not 3D");
+        BM_ASSERT_EQ(A.size(0), output->size(0), "Matrix batch=size(0) mismatch");
+    }
+//    if (A.size(0) == 1 && B.size(0) == 1 && A.is_continuous() && B.is_continuous()) {
+//        // squeeze batch, convert to 2d
+//        const core::Tensor a2d = A.view({ A.size(1), A.size(2) });
+//        const core::Tensor b2d = B.view({ B.size(1), B.size(2) });
+//        core::Tensor tmp;
+//        core::Tensor* ptr = nullptr;
+//        if (output) {
+//            tmp = output->view({ output->size(1), output->size(2) });
+//            ptr = &tmp;
+//        }
+//        core::Tensor ret = pimpl->gemm(ctx, a2d, b2d, ptr);
+//        // convert back to 3d
+//        std::vector<size_t> out_shape = { 1UL, ret.size(0), ret.size(1) };
+//        if (output) {
+//            *output = output->view(out_shape);
+//        }
+//        return ret.view(out_shape);
+//    }
+    {
+        return pimpl->batch_3d(ctx, A, B, output);
     }
 }
 
