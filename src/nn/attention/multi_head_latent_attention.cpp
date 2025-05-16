@@ -46,7 +46,7 @@ class Attention::impl::MLAImpl : public Attention::impl {
     size_t kv_lora_rank;
     size_t nope_head_dim;
     size_t pe_head_dim;
-    size_t qk_head_dim;
+    size_t qk_head_dim; // nope_head_dim + pe_head_dim
     size_t v_head_dim;
 
     float attn_scale;
@@ -59,12 +59,12 @@ class Attention::impl::MLAImpl : public Attention::impl {
     LinearPtr q_proj;
     LinearPtr q_a_proj; // (hidden_size, q_lora_rank)T
     std::unique_ptr<LayerNorm> q_a_layernorm;
-    LinearPtr q_b_proj;
+    LinearPtr q_b_proj; // (q_lora_rank, num_heads * qk_head_dim)T
     LinearPtr q_proj_nope;
     LinearPtr q_proj_pe;
 
     LinearPtr kv_a_proj_with_mqa; // (hidden_size, kv_lora_rank + pe_head_dim)T
-    LinearPtr kv_b_proj;
+    LinearPtr kv_b_proj;  // (kv_lora_rank, num_heads * (nope_head_dim + v_head_dim)T
     std::unique_ptr<LayerNorm> kv_a_layernorm;
 
     LinearPtr kv_a_proj_lora; // (hidden_size, kv_lora_rank)T
@@ -74,13 +74,17 @@ class Attention::impl::MLAImpl : public Attention::impl {
 
     LinearPtr qkv_a_proj_with_pe; // (hidden_size, q_lora_rank + kv_lora_rank + pe_head_dim)T
 
-    LinearPtr o_proj;
+    LinearPtr o_proj; // (num_heads * v_head_dim, hidden_size)T
 
-    // For data parallel
-    bool data_parallel;
+    // Data parallel:
+    // 1=>v1, 2=>v2.
+    // v1: attn dp, cache replicated;
+    // v2: attn dp, cache dp.
+    int data_parallel;
+    int data_parallel_out;
     LinearPtr q_proj_full;
     LinearPtr q_b_proj_full;
-    LinearPtr kv_b_proj_full;
+    LinearPtr kv_b_proj_full; // kv_lora_rank => num_heads * (nope_head_dim + v_head_dim)
     LinearPtr k_proj_full; // (kv_lora_rank, num_heads * nope_head_dim)T
     LinearPtr v_proj_full; // (kv_lora_rank, num_heads * v_head_dim)T
     LinearPtr o_proj_full;
@@ -112,16 +116,22 @@ public:
       gemm(ctx, dtype, false, false),
       gemm_transB(ctx, dtype, false, true)
     {
+        if (utils::get_int_env("MLA_FORCE_HALF")) {
+            dtype = DataType::kHalf;  // TODO: cast weight for layernorm
+        }
         if (cfg.rope_cfg.mscale_all_dim > 0.) {
             double mscale = yarn_get_mscale(cfg.rope_cfg.factor, cfg.rope_cfg.mscale_all_dim);
             attn_scale = float(attn_scale * mscale * mscale);
         }
 
-        data_parallel = utils::get_int_env("ATTN_DATA_PARALLEL", 0) > 0;
+        data_parallel = utils::get_int_env("ATTN_DATA_PARALLEL", 0);
+        data_parallel_out = utils::get_int_env("ATTN_DATA_PARALLEL_OUT", data_parallel);
         DistLayout b_layout = DistLayout::COLUMNAR;
         DistLayout o_layout = DistLayout::ROW;
         if (data_parallel) {
             b_layout = DistLayout::REPLICATED;
+        }
+        if (data_parallel_out) {
             o_layout = DistLayout::REPLICATED;
         }
         if (q_lora_rank <= 0) {
@@ -181,11 +191,10 @@ public:
     void on_load(const core::Context& ctx) override {
         static int latent_cache = utils::get_int_env("LATENT_CACHE", 0);
         if (latent_cache == 0) return;
-        if (data_parallel) {
+        if (data_parallel > 0) {
             q_proj_full.swap(q_proj);
             q_b_proj_full.swap(q_b_proj);
             kv_b_proj_full.swap(kv_b_proj);
-            o_proj_full.swap(o_proj);
             if (q_lora_rank <= 0) {
                 split_out(ctx, q_proj_full, q_proj);
             } else {
@@ -193,7 +202,11 @@ public:
                 split_out(ctx, q_b_proj_full, q_b_proj);
             }
             split_out(ctx, kv_b_proj_full, kv_b_proj);
-            split_in(ctx, o_proj_full, o_proj);
+            if (data_parallel_out) {
+                o_proj_full.swap(o_proj);
+                split_in(ctx, o_proj_full, o_proj);
+            }
+            // kv_lora_rank => num_heads * (nope_head_dim + v_head_dim)
             Tensor w = kv_b_proj_full->get_dequant_weight(ctx);
             Tensor w3d = w.view({ctx.world_size() * num_heads, nope_head_dim + v_head_dim, kv_lora_rank});
             auto [w_a, w_b] = split_dim1(ctx, w3d, nope_head_dim, v_head_dim);
@@ -227,6 +240,7 @@ public:
             qkv_a_proj_with_pe.reset(Linear::fuse(ctx, *q_a_proj, *kv_a_proj_with_mqa));
             // BM_ASSERT(qkv_a_proj_with_pe.get(), "");
             if (!qkv_a_proj_with_pe) {
+                // BM_ASSERT(false, "qkv_a_proj_with_pe is null");
                 Tensor w1 = q_a_proj->get_dequant_weight(ctx);
                 Tensor w2 = kv_a_proj_with_mqa->get_dequant_weight(ctx);
                 Tensor w_all = functions::concat_tensor(ctx, w1, w2, 0);
@@ -235,6 +249,13 @@ public:
             if (qkv_a_proj_with_pe)
                 qkv_a_proj_with_pe->name = "qkv_a_proj_with_pe";
         }
+        if (is_cache_dp()) {
+            BM_ASSERT(qkv_a_proj_with_pe, "");
+        }
+    }
+
+    bool is_cache_dp() {
+        return data_parallel == 2;
     }
 
     void add_submodules(core::Layer* layer) override {
@@ -301,6 +322,7 @@ public:
         core::Tensor* output
     ) override ;
 
+    // NOTE: if q_lora_rank, h is q_a
     Tensor forward_q(const core::Context& ctx, const Tensor& h, bool norm=true, bool full=false) {
         Tensor q; // (len_q, num_heads * qk_head_dim)
         if (q_lora_rank <= 0) {
@@ -354,7 +376,7 @@ public:
         const core::Tensor& position,
         core::Tensor* output
     );
-    core::Tensor forward_compressed_data_parallel(
+    core::Tensor forward_compressed_dp_v1(
         model::ModelContext& ctx,
         const Tensor& hidden_q,  // (group_len_q, dim_model)
         const core::Tensor& position,
@@ -449,9 +471,14 @@ public:
         Tensor kv = get_compressed_kv_v2(ctx, h, position);
         return {q, kv};
     }
-    // Return q, kv
+    // Return q (num_token, num_heads, nope_head_dim + pe_head_dim), kv if up=true
+    //        q_a_norm (num_token, q_lora_rank), kv if up=false
     std::pair<Tensor, Tensor> process_compressed_all_v2(
         const core::Context& ctx, const Tensor& h, const Tensor& position, bool up=true, bool full=false) {
+        if (!qkv_a_proj_with_pe) {
+            BM_ASSERT(up, "Up should be true");
+            return process_compressed_all_v1(ctx, h, position, full);
+        }
         // step 0: project a for all
         Tensor a = qkv_a_proj_with_pe->forward(ctx, h);
         Tensor q_a = a.virtual_slice(0, q_lora_rank);
@@ -487,12 +514,7 @@ core::Tensor Attention::impl::MLAImpl::forward_compressed_cache(
     core::Tensor* output
 ) {
     // Step 0: q
-    Tensor q, kv;
-    if (qkv_a_proj_with_pe) {
-        std::tie(q, kv) = process_compressed_all_v2(ctx, hidden_q, position);
-    } else {
-        std::tie(q, kv) = process_compressed_all_v1(ctx, hidden_q, position);
-    }
+    auto [q, kv] = process_compressed_all_v2(ctx, hidden_q, position);
 
     model::DynBatchContext* dyn_batch = ctx.dyn_batch().get();
     size_t len_q = hidden_q.numel() / hidden_q.size(-1);
@@ -519,14 +541,17 @@ core::Tensor Attention::impl::MLAImpl::forward_compressed_cache(
     // Search part
     if (num_s > 0) {
         core::EventScope ev_search(ctx, "Search[num_s=" + std::to_string(num_s) + "]", 2);
+        const Tensor q_search = q.slice_dim0_len(num_enc, num_s);
+        const Tensor kv_search = kv.slice_dim0_len(num_enc, num_s);
+        const Tensor attn_out_search = attn_val_g.slice_dim0_len(num_enc, num_s);
         search_compressed_cache(
             ctx,
             dyn_batch,
-            q.slice_dim0_len(num_enc, num_s),
-            kv.slice_dim0_len(num_enc, num_s),
-            attn_val_g.slice_dim0_len(num_enc, num_s));
+            q_search,
+            kv_search,
+            attn_out_search);
         if (ctx.debug() > 4)
-            std::cout << "SearchCompress: " << attn_val_g.slice_dim0_len(num_enc, num_s) << endl;
+            std::cout << "SearchCompress: " << attn_out_search << endl;
     }
 
     auto ret = o_proj->forward(ctx, attn_val_g); // (group_len_q, dim_model)
@@ -697,8 +722,9 @@ void Attention::impl::MLAImpl::copy_to_compressed_cache(
     size_t cache_dim = kv_lora_rank + pe_head_dim;
     Tensor buf_addr = rag_buffer->buf_k_addr(ctx, ctx.current_layer()); // batch => (len_buf, 1, cache_dim)
     const Tensor* s_len_buf = ctx.identity(&dyn_batch->s_len_buf, "s_len_buf");
-    const Tensor* s_mask = ctx.identity(&dyn_batch->s_mask, "s_mask");
+    // const Tensor* s_mask = ctx.identity(&dyn_batch->s_mask, "s_mask");
     const Tensor* s_placement = &dyn_batch->s_placement; // (batch, len_q)
+
     BM_ASSERT_EQ(2, s_placement->ndim(), "placement is not 2d");
     size_t batch = s_placement->size(0);
     size_t len_q = s_placement->size(1);
@@ -751,6 +777,7 @@ void Attention::impl::MLAImpl::attn_by_gemm(
     // functions::copy_last_dim(stream, v_ext, attn_results[i], 0, kv_lora_rank);
 }
 
+// Note: FlashMLA doesn't support mask
 void Attention::impl::MLAImpl::attn_by_flash_mla(
     model::ModelContext& ctx,
     model::DynBatchContext* dyn_batch,
@@ -774,7 +801,7 @@ void Attention::impl::MLAImpl::attn_by_flash_mla(
     size_t num_blocks = len_buf / 64U;
 
     int pos = dyn_batch->sv_position.at(b * len_q);
-    Tensor seqlens_k = ctx.tensor_of(std::vector<int>({pos}));
+    Tensor seqlens_k = ctx.tensor_of(std::vector<int>({pos + 1}));
     Tensor tile_scheduler_metadata;
     Tensor num_splits;
     std::tie(tile_scheduler_metadata, num_splits) =
@@ -804,11 +831,11 @@ static std::tuple<Tensor, Tensor, Tensor> fake_paged_buffer(
     vector<int> len_buffers;
     int max_num_blocks = 0;
     for (int b = begin; b < end; ++b) {
-        int len_buf = dyn_batch->sv_position.at(b * len_q);
+        int len_buf = dyn_batch->sv_position.at(b * len_q) + 1;
         len_buffers.push_back(len_buf);
         max_num_blocks = std::max(max_num_blocks, ceil_div(len_buf, 64));
     }
-
+    // FIXME
     size_t num_layers = ctx.rag_buffer()->buf_k_[0]->get_num_layers();
     vector<int> table(num_layers * batch * max_num_blocks);
     const size_t PAGE_BYTES = 64 * 576 * 2;
@@ -835,6 +862,7 @@ static std::tuple<Tensor, Tensor, Tensor> fake_paged_buffer(
     return {seqlens_k, paged_kv, block_table};
 }
 
+// Note: FlashMLA doesn't support mask
 void Attention::impl::MLAImpl::attn_by_flash_mla_batch(
     model::ModelContext& ctx,
     model::DynBatchContext* dyn_batch,
@@ -970,12 +998,21 @@ void Attention::impl::MLAImpl::search_compressed_cache(
 }
 
 // Note: KV cache is still replicated in current implementation.
-core::Tensor Attention::impl::MLAImpl::forward_compressed_data_parallel(
+core::Tensor Attention::impl::MLAImpl::forward_compressed_dp_v1(
     model::ModelContext& ctx,
     const Tensor& hidden_q,  // (batch * len_q, dim_model)
     const core::Tensor& position,
     core::Tensor* output
 ) {
+    Tensor batch_ret = output ? * output : ctx.tensor(hidden_q.shape(), dtype);
+    functions::zeros_(ctx, batch_ret);
+    Tensor attn_val_batch = ctx.tensor({hidden_q.size(0), num_heads * ctx.world_size(), kv_lora_rank}, dtype);
+    Tensor attn_out_batch;
+    if (!data_parallel_out) {
+        attn_out_batch = ctx.tensor({hidden_q.size(0), num_heads * ctx.world_size() * v_head_dim}, dtype);
+        functions::zeros_(ctx, attn_out_batch);
+    }
+
     model::DynBatchContext* dyn_batch = ctx.dyn_batch().get();
     BM_ASSERT_EQ(dyn_batch->e_placement.numel(), 0, "");
     const Tensor* s_placement = &dyn_batch->s_placement; // (batch, len_q)
@@ -983,34 +1020,49 @@ core::Tensor Attention::impl::MLAImpl::forward_compressed_data_parallel(
     int batch = s_placement->size(0);
     size_t len_q = s_placement->size(1);
     BM_ASSERT_EQ(len_q, 1, "Support 1 only");
-
-    // Step 0: q_a, kv. TODO: after kv cache is not replicated, replace batch_inputs with slice
-    Tensor q_a, kv;
-    if (qkv_a_proj_with_pe) {
-        std::tie(q_a, kv) = process_compressed_all_v2(ctx, hidden_q, position, false);
-    } else {
-        q_a = hidden_q;
-        kv = get_compressed_kv_v2(ctx, hidden_q, position);
-    }
-
-    // Step 1: Copy to buffer
-    copy_to_compressed_cache(ctx, dyn_batch, kv);
     size_t cache_dim = kv_lora_rank + pe_head_dim;
 
-    Tensor batch_ret = ctx.tensor(hidden_q.shape(), dtype);
-    functions::zeros_(ctx, batch_ret);
-    int part_batch = ceil_div(batch, ctx.world_size());
-    static int debug_part_size = utils::get_int_env("ATTN_DP_PART_SIZE", 0);
-    part_batch = debug_part_size > part_batch ? debug_part_size : part_batch;
-    // Tensor ret = ctx.tensor({size_t(part_batch), batch_inputs.size(-1)}, dtype);
-    int start = ctx.rank() * part_batch;
-    int end = std::min(start + part_batch, batch);
-    if (start < end) {
-        Tensor ret = batch_ret.slice_dim0(start, end);
-        size_t cur_batch = end - start;
+    Tensor q_a_part, ret_part;
+    int start, end;
+    if (is_cache_dp()) {
+//        // V2
+//        std::tie(start, end) = get_dp_start_end(batch, ctx.rank(), ctx.world_size());
+//        // Step 0: q_a, kv.
+//        Tensor h_part = hidden_q.slice_dim0(start, end);
+//        Tensor position_part = position.slice_dim0(start, end);
+//        auto [q_part, kv_part] = process_compressed_all_v2(ctx, h_part, position_part);
+//        // Step 1: Copy to buffer
+//        copy_to_compressed_cache_dp(ctx, dyn_batch, kv_part, start, end);
+    } else {
+        // V1: kv cache is replicated. so we need process batch kv
+        // Step 0: q_a, kv.
+        Tensor batch_q_a, batch_kv;
+        if (qkv_a_proj_with_pe) {
+            std::tie(batch_q_a, batch_kv) =
+                process_compressed_all_v2(ctx, hidden_q, position, false);
+        } else {
+            BM_ASSERT(q_lora_rank <= 0, "");
+            batch_q_a = hidden_q;
+            batch_kv = get_compressed_kv_v2(ctx, hidden_q, position);
+        }
 
+        // Step 1: Copy to buffer
+        copy_to_compressed_cache(ctx, dyn_batch, batch_kv);
+
+        int part_batch = ceil_div(batch, ctx.world_size());
+        static int debug_part_size = utils::get_int_env("ATTN_DP_PART_SIZE", 0);
+        part_batch = debug_part_size > part_batch ? debug_part_size : part_batch;
+        // Tensor ret = ctx.tensor({size_t(part_batch), batch_inputs.size(-1)}, dtype);
+        start = ctx.rank() * part_batch;
+        end = std::min(start + part_batch, batch);
+        if (start < end) {
+            q_a_part = batch_q_a.slice_dim0(start, end);
+            ret_part = batch_ret.slice_dim0(start, end);
+        }
+    }
+    if (start < end) {
+        size_t cur_batch = end - start;
         // Step 2: q up
-        Tensor q_a_part = q_a.slice_dim0(start, end);
         Tensor position_part = position.slice_dim0(start, end);
         Tensor q_part = forward_q(ctx, q_a_part, false, true);
         const size_t H = q_part.size(1);
@@ -1019,14 +1071,15 @@ core::Tensor Attention::impl::MLAImpl::forward_compressed_data_parallel(
 
         // Step 3: q_adj
         ctx.recordEvent("Gemm(q_adj_nope)(H*192=>H*512)", event_level);
-        Tensor q_nope = functions::slice_last_dim(ctx, q_part,0, nope_head_dim);
-        q_nope = q_nope.view({cur_batch, H, nope_head_dim});
-        q_nope = transpose_2_1(ctx, q_nope);  //（H, cur_batch, nope_head_dim）
+        Tensor q_nope = q_part.virtual_slice(0, nope_head_dim, -1);
+        q_nope = q_nope.view_uncontinuous({cur_batch, H, nope_head_dim});
+        q_nope = q_nope.virtual_transpose(0, 1);
         auto w1 = k_proj_full->get_weight().view({H, nope_head_dim, kv_lora_rank});
-        Tensor q_adj_nope = gemm.forward(ctx, q_nope, w1);  //（H, cur_batch, kv_lora_rank）
+        Tensor q_adj_nope = gemm.batch_3d(ctx, q_nope, w1);  //（H, cur_batch, kv_lora_rank）
         q_adj_nope = transpose_2_1(ctx, q_adj_nope); // (cur_batch, H, kv_lora_rank)
         Tensor q_adj = functions::concat_tensor(ctx, q_adj_nope, q_pe); // (cur_batch, H, kv_lora_rank+)
 
+        // Step4: cal v_attn
         Tensor v_attn = ctx.tensor({cur_batch, H, kv_lora_rank}, q_adj.dtype());
         static int use_flash_mla = utils::get_int_env("USE_FLASH_MLA", 0);
         if (use_flash_mla == 2) {
@@ -1051,24 +1104,34 @@ core::Tensor Attention::impl::MLAImpl::forward_compressed_data_parallel(
         }
 
         Tensor attn_output = ctx.tensor({cur_batch * len_q, H * v_head_dim}, dtype);
+        if (!data_parallel_out) {
+            attn_output = attn_out_batch.slice_dim0(start * len_q, end * len_q);
+        }
         v_attn = v_attn.view({cur_batch * len_q, H, kv_lora_rank}); // back to 3-D
-        v_attn = transpose_2_1(ctx, v_attn); //（num_heads, batch_len_q, kv_lora_rank）
+        v_attn = v_attn.virtual_transpose(0, 1); //（H, batch_len_q, kv_lora_rank）
         auto w2 = v_proj_full->get_weight().view({H, v_head_dim, kv_lora_rank});
-        if (cur_batch * len_q == 1) {
+        {
+            // batch=H, (cur_batch * len_q, kv_lora_rank) @ (v_head_dim, kv_lora_rank) => (cur_batch * len_q, v_head_dim)
             core::EventScope ev_v(ctx, "Gemm(v:kv_lora=>H*v_dim)(H*512=>H*128)", event_level);
-            Tensor o = attn_output.view({H, 1, v_head_dim});
-            gemm_transB.forward(ctx, v_attn, w2, &o);
-        } else {
-            core::EventScope ev_v(ctx, "Gemm(v:kv_lora=>H*v_dim)(H*512=>H*128)", event_level);
-            Tensor tmp = gemm_transB.forward(ctx, v_attn, w2); //（num_heads, batch_len_q, v_head_dim）
             Tensor o = attn_output.view({cur_batch * len_q, H, v_head_dim});
-            transpose_2_1(ctx, tmp, &o);
+            o = o.virtual_transpose(0, 1);  // (H, cur_batch * len_q, v_head_dim)
+            gemm_transB.batch_3d(ctx, v_attn, w2, &o);
         }
 //        Tensor ret1 = ret.slice_dim0(0, end - start);
-        Tensor ret1 = o_proj_full->forward(ctx, attn_output);
-        ctx.copy2(ret1, &ret);
+        if (data_parallel_out) {
+            Tensor ret1 = o_proj_full->forward(ctx, attn_output);
+            ctx.copy2(ret1, &ret_part);
+        }
     } else {
         // no job
+    }
+    if (!data_parallel_out) {
+        // Re-partition to call o_proj TP
+        // TODO: all gather should be faster
+        attn_out_batch = ctx.reduce_sum(attn_out_batch, dtype);
+        int dim_part = num_heads * v_head_dim;
+        Tensor attn_out_repart = functions::slice_last_dim(ctx, attn_out_batch, ctx.rank() * dim_part, dim_part);
+        return o_proj->forward(ctx, attn_out_repart);
     }
     // TODO: use all gather
     return batch_ret;
@@ -1076,13 +1139,14 @@ core::Tensor Attention::impl::MLAImpl::forward_compressed_data_parallel(
 
 core::Tensor Attention::impl::MLAImpl::dynamic_batch_forward(
     model::ModelContext& ctx,
-    const Tensor& hidden_states,  // (group_len_q, dim_model)
+    const Tensor& hidden_states_org,  // (group_len_q, dim_model)
     const core::Tensor& position,
     core::Tensor* output
 ) {
     core::EventScope ev(ctx, "Attention(DynBatch)", event_level - 1);
     model::DynBatchContext* dyn_batch = ctx.dyn_batch().get();
-    BM_ASSERT_EQ(hidden_states.ndim(), 2, "");
+    BM_ASSERT_EQ(hidden_states_org.ndim(), 2, "");
+    Tensor hidden_states = functions::typecast(ctx, hidden_states_org, dtype);
     size_t num_enc = dyn_batch->e_placement.numel();
     size_t num_s = dyn_batch->s_placement.numel();
     size_t len_q = dyn_batch->s_placement.size(1);
@@ -1091,7 +1155,7 @@ core::Tensor Attention::impl::MLAImpl::dynamic_batch_forward(
     if (data_parallel && ctx.latent_cache() &&
         num_enc == 0 && num_s >= data_parallel_min_batch &&
         len_q == 1) {
-        return forward_compressed_data_parallel(ctx, hidden_states, position, output);
+        return forward_compressed_dp_v1(ctx, hidden_states, position, output);
     }
     if (ctx.latent_cache()) {
         return forward_compressed_cache(ctx, hidden_states, position, output);

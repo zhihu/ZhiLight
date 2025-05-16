@@ -99,7 +99,8 @@ class GeneratorArg:
             bee_answer_multi_span: Optional[bool] = None,
             presence_penalty: float = 0.,
             top_logprobs: int = 0,
-            logit_bias: dict[int, float] = None
+            logit_bias: dict[int, float] = None,
+            max_input_length: int = sys.maxsize,  # to truncate input for benchmark and test
     ):
         self.beam_size = beam_size
         self.max_length = max_length
@@ -114,6 +115,7 @@ class GeneratorArg:
         self.bee_answer_multi_span = bee_answer_multi_span
         self.top_logprobs = top_logprobs
         self.logit_bias = logit_bias
+        self.max_input_length = max_input_length
 
         if self.is_random:
             self.seed = seed or 42
@@ -121,9 +123,10 @@ class GeneratorArg:
             logging.warning("BeamSearch ignore seed")
             self.seed = 0
 
-    def copy(self):
+    def copy(self, **kwargs):
         obj = type(self).__new__(self.__class__)
         obj.__dict__.update(self.__dict__)
+        obj.__dict__.update(kwargs)
         return obj
 
     @property
@@ -411,7 +414,7 @@ class DynamicBatchGenerator:
         if queue_size > self.print_queue_threshold:
             logging.warning(f"High pressure: active_size={self._c_generator.active_size()} queue_size={queue_size}")
 
-    def _encode(self, data: Union[str, List[dict]]) -> List[int]:
+    def _encode(self, data: Union[str, List[dict]], arg: GeneratorArg) -> List[int]:
         if (
             isinstance(data, list)
             and isinstance(data[0], dict)
@@ -424,6 +427,8 @@ class DynamicBatchGenerator:
             # print("input_tokens", input_tokens)
         else:
             input_tokens = self._tokenizer.encode(data)
+        if len(input_tokens) > arg.max_input_length:
+            input_tokens = input_tokens[:arg.max_input_length]
         return input_tokens
 
     def _process_inputs(self, data: Union[str, dict, List[dict]], arg: GeneratorArg, stream=0):
@@ -441,7 +446,7 @@ class DynamicBatchGenerator:
                 c_task.set_position_delta(pos_delta)
             return c_task, ids
         else:
-            input_tokens = self._encode(data)
+            input_tokens = self._encode(data, arg)
             return self.to_c_task(input_tokens, arg, stream=stream), input_tokens
 
     def generate(
@@ -542,7 +547,7 @@ class DynamicBatchGenerator:
         max_out_lengths: List[int] = None,
         prepend_input: bool = False,
     ) -> List[RequestResult]:
-        batch_input = [self._encode(data) for data in input_list]
+        batch_input = [self._encode(data, arg) for data in input_list]
         if bool(max_in_lengths):
             if not isinstance(max_in_lengths, list):
                 max_in_lengths = [max_in_lengths] * len(input_list)
