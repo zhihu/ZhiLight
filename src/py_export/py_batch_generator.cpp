@@ -200,8 +200,13 @@ public:
             long finished = 0;
             int total = tasks.size();
             std::string time_str;
+
+            std::mutex batch_mutex;
+            std::condition_variable batch_cond;
+            int remaining_tasks = tasks.size();
+
             for (auto task : tasks) {
-                task->task_->callback = [task, begin_ts, &finished, total, show_progress](const generator::SearchResults& results) {
+                task->task_->callback = [task, begin_ts, &finished, total, show_progress, &batch_mutex, &batch_cond, &remaining_tasks](const generator::SearchResults& results) {
                     task->results = results;
                     task->finish_ts = get_time_us();
                     if (show_progress) {
@@ -210,11 +215,21 @@ public:
                         std::cout << "\rFinish " << finished << "/" << total
                             << ", QPS=" << qps;
                     }
+
+                    {
+                        std::lock_guard<std::mutex> lock(batch_mutex);
+                        --remaining_tasks;
+                        if (remaining_tasks == 0) {
+                            batch_cond.notify_all();
+                        }
+                    }
                 };
                 BM_ASSERT(searcher_->submit(task->task_, true, ++i >= notify_batch), "submit task failed");
                 task->enqueue_ts = get_time_us();
             }
-            searcher_->wait_all_done();
+            
+            std::unique_lock<std::mutex> lock(batch_mutex);
+            batch_cond.wait(lock, [&remaining_tasks]() { return remaining_tasks == 0; });
             if (show_progress)
                 std::cout << "\r";
         }
