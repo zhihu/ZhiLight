@@ -1,4 +1,5 @@
 #include "bmengine/core/tensor.h"
+#include "bmengine/logger/std_log_op.hpp"
 #include "private/memory.h"
 #include "private/tensor_impl.h"
 #include "bmengine/core/exception.h"
@@ -101,10 +102,22 @@ int TensorImpl::device() const {
 std::unique_ptr<TensorImpl> TensorImpl::view_uncontinuous(const std::vector<size_t>& shape, DataType dtype) const {
     // handle ONLY if strides[0] is not continuous
     bool valid0 = false;
-    if (ndim() == 2 && strides[1] == 1) {
+    // std::cout << "From " << shape_ << " to " << shape << ", strides[1]" <<strides[1] << std::endl;
+    if (shape == shape_) {
+        auto ret = std::make_unique<TensorImpl>(shape, mem, offset, dtype);
+        ret->strides = strides;
+        return ret;
+    } else if (ndim() == 2 && strides[1] == 1) {
         // from 2D to 3D
         if (shape.size() == 3 && shape[0] == shape_[0]) {  // shape[1] * shape[2] == shape_[1]
+            // Split dim0
             valid0 = true;
+        } else if (shape.size() == 3 && shape[2] == shape_[1]) {
+            // Split dim1
+            auto ret = std::make_unique<TensorImpl>(shape, mem, offset, dtype);
+            ret->strides[1] = strides[0];  // preserve strides[0]
+            ret->strides[0] = strides[0] * shape[1];
+            return std::move(ret);
         }
     } else if (ndim() == 3 && strides[1] == shape_[2] && strides[2] == 1) {
         // from 3D to 2D
@@ -117,6 +130,8 @@ std::unique_ptr<TensorImpl> TensorImpl::view_uncontinuous(const std::vector<size
         ret->strides[0] = strides[0];  // preserve strides[0]
         return std::move(ret);
     }
+    std::cerr << "Can't perform view on an un-continuous tensor.";
+    // TODO: can't throw exception in constructor
     throw std::runtime_error("Can't perform view on an un-continuous tensor.");
 }
 
