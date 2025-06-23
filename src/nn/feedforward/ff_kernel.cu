@@ -175,6 +175,7 @@ static __global__ void KERNEL_top_k_softmax(
     int scoring_type,
     int top_k_ext,
     int* worker_load,
+    int* expert_load,
     int num_worker) {
     int q = blockIdx.x;
     logits += q * num_exp;
@@ -214,6 +215,11 @@ static __global__ void KERNEL_top_k_softmax(
             atomicAdd(&worker_load[rank], 1);
         }
     }
+    if (expert_load) {
+        for (int i = 0; i < k; ++i) {
+            atomicAdd(&expert_load[idx[i]], 1);
+        }
+    }
     for (int i = k; i < top_k_ext; ++i) {
         out_v[i] = 1;
     }
@@ -224,6 +230,7 @@ std::tuple<core::Tensor, core::Tensor> top_k_softmax(
     const core::Context& ctx,
     const core::Tensor& input,
     const core::Tensor& worker_load,
+    const core::Tensor& expert_load,
     int top_k,
     int top_k_ext,
     bool norm_topk_prob,
@@ -253,6 +260,7 @@ std::tuple<core::Tensor, core::Tensor> top_k_softmax(
         scoring_type,
         top_k_ext,
         worker_load.numel() ? worker_load.data<int>() : nullptr,
+        expert_load.numel() ? expert_load.data<int>() : nullptr,
         ctx.world_size());
     });
     BM_CUDART_ASSERT(cudaGetLastError());
@@ -299,6 +307,7 @@ static __global__ void KERNEL_group_topk(
     int num_in_group,
     int top_k_ext,
     int* worker_load = nullptr,
+    int* expert_load = nullptr,
     int num_worker = 0) {
     assert(k <= MAX_TOP_K);
     assert(num_in_group <= WARP_SIZE);
@@ -432,6 +441,9 @@ static __global__ void KERNEL_group_topk(
             int rank = exp_id % num_worker;
             atomicAdd(&worker_load[rank], 1);
         }
+        if (expert_load) {
+            atomicAdd(&expert_load[exp_id], 1);
+        }
 //        if (q == 0) {
 //            printf("lane_id=%d, exp_id=%d, score=%.5f\n", lane_id, exp_id, score);
 //        }
@@ -448,6 +460,7 @@ std::tuple<core::Tensor, core::Tensor> group_topk_softmax(
     const core::Tensor& input,
     const core::Tensor& score_correction_bias,
     const core::Tensor& worker_load,
+    const core::Tensor& expert_load,
     int num_group,
     int topk_group,
     int top_k,
@@ -488,6 +501,7 @@ std::tuple<core::Tensor, core::Tensor> group_topk_softmax(
             num_in_group,
             top_k_ext,
             worker_load.numel() ? worker_load.data<int>() : nullptr,
+            expert_load.numel() ? expert_load.data<int>() : nullptr,
             ctx.world_size()
         );
     });
@@ -701,7 +715,7 @@ core::Tensor sum_experts(
         });
     } else {
         core::Tensor ptr_arr = ctx.tensor({ptr_vec.size()}, core::DataType::kDouble);
-        ptr_arr.from_buffer(ptr_vec.data());
+        ptr_arr.from_buffer(ptr_vec.data());  // TODO: no sync
         // core::Tensor input_lens = ctx.tensor_of(len_vec);
         core::Tensor input_lens;
         BM_DTYPE_DISPATCH_FLOAT(dtype, {
@@ -732,6 +746,7 @@ static __global__ void KERNEL_route_shared_lb_v1(
     int* exp_ids,
     float* exp_weights,
     int* worker_load,
+    int* expert_load,
     const int max_load,
     const int world_size,
     const int seq_len,
@@ -747,7 +762,9 @@ static __global__ void KERNEL_route_shared_lb_v1(
         for (int k = top_k; k < top_k_ext; ++k) {
             while (true) {
                 if (atomicAdd(&worker_load[rank], 1) < max_load) {
-                    exp_ids[q * top_k_ext + k] = (num_local_experts + k - top_k) * world_size + rank;
+                    int exp_id = (num_local_experts + k - top_k) * world_size + rank;
+                    exp_ids[q * top_k_ext + k] = exp_id;
+                    atomicAdd(&expert_load[exp_id], 1);
                     // exp_weights[q * top_k_ext + k] = 1;
                     break;
                 } else {
@@ -764,6 +781,7 @@ static __global__ void KERNEL_route_shared_lb(
     int* exp_ids,
     float* exp_weights,
     int* worker_load,
+    int* expert_load,
     const int max_load,
     const int world_size,
     const int seq_len,
@@ -779,7 +797,7 @@ static __global__ void KERNEL_route_shared_lb(
     }
 
     const int q = blockIdx.x;
-    const int s = blockIdx.y;
+    const int s = blockIdx.y;  // index of shared experts
     int r = 0;
 
     // skip seq_len * s
@@ -792,8 +810,9 @@ static __global__ void KERNEL_route_shared_lb(
     assert(skip_len < capacities[r]);
 
     int rank = ranks[r];
-    int exp_id = (num_local_experts + s) * world_size + rank;
+    int exp_id = (num_local_experts + s) * world_size + rank;  // fake expert id!
     exp_ids[q * top_k_ext + top_k + s] = exp_id;
+    atomicAdd(&expert_load[exp_id], 1);
 //    if (q == 0) {
 //        printf("offset=%d, exp=%d\n", q * top_k_ext + s, exp_id);
 //    }
@@ -804,6 +823,7 @@ void route_shared_lb(
     core::Tensor& exp_ids,
     core::Tensor& exp_weights,
     core::Tensor& worker_load,
+    core::Tensor& expert_load,
     int top_k,
     int num_local_experts) {
     BM_ASSERT_EQ(exp_ids.ndim(), 2, "Wrong exp_ids dim");
@@ -825,6 +845,7 @@ void route_shared_lb(
         exp_ids.data<int>(),
         exp_weights.data<float>(),
         worker_load.data<int>(),
+        expert_load.data<int>(),
         max_load,
         ctx.world_size(),
         seq_len,
@@ -832,5 +853,123 @@ void route_shared_lb(
         top_k_ext,
         num_local_experts);
     BM_CUDART_ASSERT(cudaGetLastError());
+}
+
+static __global__ void KERNEL_plus_for_sort(
+    int* exp_ids,
+    int* ext_exp_ids,
+    int multiple,
+    int world_size,
+    int numel
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < numel) {
+        int exp_id = exp_ids[i];
+        int rank = exp_id % world_size;
+        int ext_exp_id = exp_id + rank * multiple;
+        ext_exp_ids[i] = ext_exp_id;
+    }
+}
+
+core::Tensor plus_for_sort(
+    const core::Context& ctx,
+    core::Tensor& exp_ids,
+    int num_experts) {
+    BM_ASSERT_EQ(num_experts % ctx.world_size(), 0, "num_experts can't divide world_size");
+    int top_k_ext = exp_ids.size(-1);
+//    int multiple = num_experts * top_k_ext;
+    // int multiple = 10000;  // 10000 is easier for debug
+    int multiple = num_experts;
+
+    core::Tensor out = ctx.tensor(exp_ids.shape(), exp_ids.dtype());
+
+    int threads = 256;
+    int blocks = round_up(exp_ids.numel(), threads) / threads;
+    auto stream = ctx.current_cuda_stream();
+
+    KERNEL_plus_for_sort<<<blocks, threads, 0, stream>>>(
+        exp_ids.data<int>(),
+        out.data<int>(),
+        multiple,
+        ctx.world_size(),
+        exp_ids.numel()
+    );
+    BM_CUDART_ASSERT(cudaGetLastError());
+
+    return out;
+}
+
+#define MAX_INLINE_INT 264
+struct InlineInts {
+    void* data[MAX_INLINE_INT];
+};
+
+// (seq_len), (K)
+static __global__ void KERNEL_calc_reverse_idx(
+    const int* exp_ids,
+    const int* indices,
+    const int* expert_offsets,
+    int* rev_indices
+) {
+    int s = blockIdx.x;
+    int k = threadIdx.x;
+    int i = s * blockDim.x + k;
+    int idx = indices[i];  // idx in unsorted exp_ids !!!
+    int exp_id = exp_ids[idx];
+    int exp_offset = expert_offsets[exp_id];
+    int rev_idx = i - exp_offset;
+    rev_indices[idx] = rev_idx;
+}
+
+core::Tensor calc_reverse_idx(
+    const core::Context& ctx,
+    core::Tensor& exp_ids,  // (seq_len, K)
+    core::Tensor& indices,  // (seq_len * K)
+    const std::vector<int>& all_loads,
+    int num_experts,
+    bool sorted_by_rank
+) {
+    BM_ASSERT_EQ(exp_ids.ndim(), 2, "exp_ids is not 2D");
+    BM_ASSERT_EQ(indices.ndim(), 1, "idx is not 1D");
+    BM_ASSERT_EQ(indices.numel(), exp_ids.numel(), "idx and exp_ids numel mismatch");
+
+    size_t seq_len = exp_ids.size(0);
+    size_t K = exp_ids.size(1);
+    int world_size = ctx.world_size();
+
+    std::vector<int> rank_offsets(world_size, 0);
+    std::vector<int> expert_offset(num_experts);
+    if (sorted_by_rank) {
+        const int* rank_loads = &all_loads[num_experts];
+        int rank_offset = 0;
+        for (int rank = 0; rank < world_size; ++rank) {
+            // rank_offsets[i] = offset;
+            int offset = 0;
+            for (int i = rank; i < num_experts; i += world_size) {
+                expert_offset[i] = rank_offset + offset;
+                offset += all_loads[i];
+            }
+            rank_offset += rank_loads[rank];
+        }
+    } else {
+        int offset = 0;
+        for (int i = 0; i < num_experts; ++i) {
+            expert_offset[i] = offset;
+            offset += all_loads[i];
+        }
+    }
+    core::Tensor expert_offset_t = ctx.tensor_of(expert_offset);
+    core::Tensor rev_indices = ctx.tensor(indices.shape(), indices.dtype());
+
+    auto stream = ctx.current_cuda_stream();
+    KERNEL_calc_reverse_idx<<<seq_len, K, 0, stream>>>(
+        exp_ids.data<int>(),
+        indices.data<int>(),
+        expert_offset_t.data<int>(),
+        rev_indices.mutable_data<int>()
+    );
+    BM_CUDART_ASSERT(cudaGetLastError());
+
+    return rev_indices;
 }
 }
