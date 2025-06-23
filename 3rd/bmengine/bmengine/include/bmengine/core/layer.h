@@ -58,6 +58,12 @@ public:
         const std::string& name,
         Tensor* param,
         bool allow_missing = false);
+    static void load_param_cast(
+        const Context& ctx,
+        const std::map<std::string, const Tensor>& state_dict,
+        const std::string& name,
+        Tensor* param,
+        core::DataType cast_src_dtype);
 };
 
 } // namespace core

@@ -75,7 +75,7 @@ struct DTypeDeducer<void*> {
             BM_PRIVATE_DTYPE_DISPATCH_CASE(kFloat, float, __VA_ARGS__)                             \
             BM_PRIVATE_DTYPE_DISPATCH_CASE(kHalf, half, __VA_ARGS__)                               \
             BM_PRIVATE_DTYPE_DISPATCH_CASE(kBFloat16, nv_bfloat16, __VA_ARGS__)                    \
-            default: BM_EXCEPTION("Unsupported data type");                                        \
+            default: BM_EXCEPTION(std::string("Unsupported float data type ") + core::get_data_type_name(_dtype));  \
         };                                                                                         \
     } while (0)
 
@@ -88,6 +88,19 @@ struct DTypeDeducer<void*> {
             default: BM_EXCEPTION("data type is not half or BF16");                                \
         };                                                                                         \
     } while (0)
+
+#define BM_CORE_DTYPE_DISPATCH(dtype, ...)                                                              \
+    do {                                                                                           \
+        const auto& _dtype = dtype;                                                                \
+        switch (_dtype) {                                                                          \
+            BM_PRIVATE_DTYPE_DISPATCH_CASE(kInt32, int32_t, __VA_ARGS__)                           \
+            BM_PRIVATE_DTYPE_DISPATCH_CASE(kFloat, float, __VA_ARGS__)                             \
+            BM_PRIVATE_DTYPE_DISPATCH_CASE(kHalf, half, __VA_ARGS__)                               \
+            BM_PRIVATE_DTYPE_DISPATCH_CASE(kBFloat16, nv_bfloat16, __VA_ARGS__)                    \
+            default: BM_EXCEPTION(std::string("Unsupported core data type ") + core::get_data_type_name(_dtype));  \
+        };                                                                                         \
+    } while (0)
+
 
 } // namespace core
 } // namespace bmengine

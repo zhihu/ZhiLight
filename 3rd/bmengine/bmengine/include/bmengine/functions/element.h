@@ -22,6 +22,8 @@ class BinaryElementwiseOp : public core::Layer {
 void check_numeric(const core::Context& ctx, const core::Tensor& tensor);
 void check_equal(const core::Context& ctx, const core::Tensor& a, const core::Tensor& b);
 
+core::Tensor divide(const core::Context& ctx, const core::Tensor& a, float divisor);
+
 core::Tensor pow(const core::Context& ctx, const core::Tensor& a, float exp);
 
 core::Tensor clamp(const core::Context& ctx, const core::Tensor& a, float min, float max);

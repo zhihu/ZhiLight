@@ -42,7 +42,8 @@ core::Tensor slice_last_dim(
     const core::Context& ctx,
     const core::Tensor& tensor,
     int from,
-    int len
+    int len,
+    core::Tensor* out_ptr = nullptr
 );
 }  // namespace functions
 }  // namespace bmengine

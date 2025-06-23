@@ -244,11 +244,15 @@ core::Tensor slice_last_dim(
     const core::Context& ctx,
     const core::Tensor& input,
     int from,
-    int len
+    int len,
+    core::Tensor* out
 ) {
     auto shape = input.shape();
     shape[shape.size() - 1] = len;
-    auto output = ctx.tensor(shape, input.dtype());
+    if (out) {
+        BM_ASSERT_EQ(out->shape(), shape, "out shape mismatch");
+    }
+    auto output = out ? * out : ctx.tensor(shape, input.dtype());
     copy_last_dim(ctx.current_stream()->ptr, input, output, from, from + len);
     return output;
 }

@@ -470,7 +470,7 @@ void Context::assign_or_copy(Tensor* dst, const Tensor* src) const {
     }
     BM_ASSERT_EQ(src->shape(), dst->shape(), "src and dst have different shape");
     if (src->dtype() != DataType::kInt16)
-        BM_ASSERT_EQ(src->dtype(), dst->dtype(), "src and dst have different dtype");
+        BM_ASSERT_EQ(src->dtype(), dst->dtype(), "Assign to different dtype. src: " + src->name());
     // allocate memory
     if (dst->data() == nullptr) {
         init_parameter(dst->name(), dst);
@@ -492,6 +492,9 @@ void Context::recordEvent(const std::string& name, int ev_level, float flops) co
     }
 }
 
+int Context::event_level() const {
+    return pimpl->event_level;
+}
 void Context::set_event_level(int level) const {
     pimpl->event_level = level;
 }

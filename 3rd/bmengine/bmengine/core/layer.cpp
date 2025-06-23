@@ -2,6 +2,7 @@
 #include <iomanip>
 #include "bmengine/core/context.h"
 #include "bmengine/functions/init.h"
+#include "bmengine/functions/typecast.h"
 #include <curand.h>
 #include <iostream>
 
@@ -110,6 +111,25 @@ void Layer::load_param_from_state_dict(
         return;
     }
     ctx.assign_or_copy(param, &it->second);
+}
+
+void Layer::load_param_cast(
+    const Context& ctx,
+    const std::map<std::string, const Tensor>& state_dict,
+    const std::string& name,
+    Tensor* param,
+    core::DataType cast_src_dtype) {
+    auto it = state_dict.find(name);
+    BM_ASSERT(it != state_dict.end(), "param " + name + " not found in state_dict");
+
+    auto& src = it->second;
+    if (src.dtype() == cast_src_dtype) {
+        Tensor tmp = ctx.tensor(param->shape(), cast_src_dtype);
+        ctx.assign_or_copy(&tmp, &it->second);
+        *param = functions::typecast(ctx, tmp, param->dtype());
+    } else {
+        ctx.assign_or_copy(param, &it->second);
+    }
 }
 
 } // namespace core

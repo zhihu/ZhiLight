@@ -87,6 +87,32 @@ void fill(const core::Context& ctx, const core::Tensor& x, float value) {
     });
     BM_CUDART_ASSERT(cudaGetLastError());
 }
+
+static __global__ void KERNEL_arange(
+    int start, int end, int step,
+    int32_t* out // (n, len)
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int n = start + i * step;
+    if (n < end) {
+        out[i] = n;
+    }
+}
+
+core::Tensor arange(const core::Context& ctx, int start, int end, int step) {
+    size_t num = size_t(end - start) / step;
+    core::Tensor indices = ctx.tensor({ num }, core::DataType::kInt32);
+
+    int threads = 256;
+    int blocks = round_up(num, threads) / threads;
+    auto stream = ctx.current_cuda_stream();
+
+    KERNEL_arange<<<blocks, threads, 0, stream>>>(start, end, step, indices.data<int>());
+
+    BM_CUDART_ASSERT(cudaGetLastError());
+
+    return indices;
+}
 }
 
 }
