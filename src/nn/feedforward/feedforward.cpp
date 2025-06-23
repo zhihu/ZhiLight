@@ -1,4 +1,5 @@
 #include "nn/feedforward/feedforward.h"
+#include "nn/feedforward/ff_kernel.h"
 #include "nn/linear/activation_kernel.h"
 #include "nn/linear/gemm_grouped.h"
 #include "nn/linear/linear.h"
@@ -9,6 +10,8 @@
 #include <bmengine/c10d/c10d.h>
 #include <bmengine/core/core.h>
 #include <bmengine/functions/all.h>
+#include <bmengine/functions/sort.h>
+#include <bmengine/logger/kernel_time_trace.hpp>
 #include <bmengine/logger/std_log_op.hpp>
 #include <algorithm>
 #include <memory>
@@ -187,7 +190,7 @@ class FeedForward::impl::MOEImpl : public FeedForward::impl {
 public:
     int dim_model, dim_ff;
     int num_experts;
-    int num_experts_may_share;
+    int num_experts_may_share; // = num_experts + n_shared_experts * world_size; if (dyn_shared)
     int num_local_experts;
     int top_k;
     int top_k_may_share;
@@ -201,6 +204,7 @@ public:
     bool parallel;
     bool exp_parallel;
     bool dyn_shared { false };
+    int gpu_dispatch_thres { 10000000 };
     int n_shared_experts { 0 };
     const int world_size;
     const int local_rank;
@@ -208,7 +212,7 @@ public:
     Linear router;
     Tensor e_score_correction_bias;
 
-    std::vector<NormalImpl*> experts;
+    std::vector<NormalImpl*> experts;  // local experts if EP mode; all rank append shared experts if dyn_shared
     std::shared_ptr<NormalImpl> shared_expert;
     std::shared_ptr<Linear> shared_expert_gate;
     const int MAX_SEQ_LEN = 320000;
@@ -237,8 +241,8 @@ public:
           parallel(parallel),
           dyn_shared(dyn_shared),
           world_size(ctx.world_size()),
-          local_rank(ctx.rank()),
-          router(ctx, dim_model, num_experts, "", 0, false, false, false, DistLayout::ROW, dtype) {
+          local_rank(ctx.rank()) {
+        gpu_dispatch_thres = utils::get_int_env("MOE_GPU_DISPATCH_THRES", 100000000);
         if (cfg.moe_intermediate_size > 0) {
             cfg.dim_ff = cfg.moe_intermediate_size;
         }
@@ -377,7 +381,7 @@ public:
         return {group_idx_d, reverse_idx_d};
     }
 
-    tuple<Tensor, Tensor> permute_input(
+    tuple<Tensor, Tensor, Tensor> permute_input(
         const core::Context& ctx,
         const Tensor& h,
         const vector<int>& routing_experts,         // (num_experts, top_k)
@@ -395,26 +399,28 @@ public:
             }
             // h_reorder: (seq_len * top_k) if NOT exp_parallel
             // rev_idx_d: (seq_len * top_k) always
-            return {h_reorder, rev_idx_d};
+            return {h_reorder, idx_d, rev_idx_d};
         } else {
             // total_seq_len == 1, all expert's input is original input, no need permutation.
-            return {h, Tensor()};
+            return {h, Tensor(), Tensor()};
         }
     }
 
     // Return
     //   exp_ids    (num_token, top_k_may_share)
     //   exp_weight (num_token, top_k_may_share)
-    std::tuple<Tensor, Tensor> route(const core::Context& ctx, const Tensor& input, bool with_shared=false) {
+    std::tuple<Tensor, Tensor, Tensor> route(const core::Context& ctx, const Tensor& input, bool with_shared=false) {
         // ctx.recordEvent("router_logits", 3);
         Tensor logit = router.forward(ctx, input); // (total_seq_len, n_experts)
         ctx.recordEvent("top_k_softmax", 2);
-        Tensor exp_ids, exp_weights, worker_load;
+        Tensor exp_ids, exp_weights;
         size_t top_k_ext = with_shared ? top_k_may_share : top_k;
-        if (with_shared) {
-            worker_load = ctx.tensor({size_t(ctx.world_size())}, core::DataType::kInt32);
-            functions::zeros_(ctx, worker_load);
-        }
+
+        Tensor all_load =ctx.tensor({size_t(num_experts_may_share + ctx.world_size())}, core::DataType::kInt32);
+        functions::zeros_(ctx, all_load);
+        Tensor expert_load = all_load.slice_dim0_len(0, num_experts_may_share);
+        Tensor worker_load = all_load.slice_dim0_len(num_experts_may_share, ctx.world_size());
+
         if (ctx.rank() == 0 || true) {
             if (topk_group > 1) {
                 Tensor score = ctx.tensor(logit.shape(), logit.dtype());
@@ -425,26 +431,26 @@ public:
                     ctx,
                     logit,
                     e_score_correction_bias,
-                    worker_load,
+                    worker_load, expert_load,
                     n_group, topk_group, top_k, top_k_ext, norm_topk_prob, routed_scaling_factor, scoring_func);
-                if (ctx.is_layer(300)) {
-//                Tensor ids = exp_ids.slice_dim0(0, 1).view({size_t(top_k_may_share)});
-//                Tensor w = functions::index_select(ctx, score.slice_dim0(0, 1), -1, ids);
-//                std::cout << "expert_weights(slice) " << w << endl;
-                    std::cout << "logit " << logit << endl;
-                    std::cout << "expert_weights " << exp_weights << endl;
-                    std::cout << "exp_ids " << exp_ids << endl;
-                }
             } else {
                 std::tie(exp_weights, exp_ids) = top_k_softmax(
-                    ctx, logit, worker_load, top_k, top_k_ext, norm_topk_prob, routed_scaling_factor, scoring_func);
+                    ctx, logit, worker_load, expert_load, top_k, top_k_ext, norm_topk_prob, routed_scaling_factor, scoring_func);
+            }
+            if (ctx.is_layer(300)) {
+//                Tensor ids = exp_ids.slice_dim0(0, 1).view({size_t(top_k_may_share)});
+//                Tensor w = functions::index_select(ctx, logit.slice_dim0(0, 1), -1, ids);
+//                std::cout << "expert_weights(slice) " << w << endl;
+                std::cout << "logit " << logit << endl;
+                std::cout << "expert_weights " << exp_weights << endl;
+                std::cout << "exp_ids " << exp_ids << endl;
             }
             if (with_shared) {
 //                std::cout << "expert_ids " << exp_ids << endl;
 //                std::cout << "expert_weights " << exp_weights << endl;
 //                std::cout << "worker_load " << worker_load << endl;
                 ctx.recordEvent("route_shared_lb", 2);
-                route_shared_lb(ctx, exp_ids, exp_weights, worker_load, top_k, num_local_experts);
+                route_shared_lb(ctx, exp_ids, exp_weights, worker_load, expert_load, top_k, num_local_experts);
 //                std::cout << "# expert_ids " << exp_ids << endl;
 //                std::cout << "# expert_weights " << exp_weights << endl;
 //                std::cout << "# worker_load " << worker_load << endl;
@@ -460,9 +466,10 @@ public:
             // Broadcast to make sure all shards have the ids/weights
             c10d::NCCLBroadcast(ctx, exp_weights, exp_weights, 0);
             c10d::NCCLBroadcast(ctx, exp_ids, exp_ids, 0);
+            ctx.recordEvent("End>broadcast_top_k_result", 2);
         }
         // (total_seq_len, top_k)
-        return {exp_ids, exp_weights};
+        return {exp_ids, exp_weights, all_load};
     }
 
     Tensor with_share(const core::Context& ctx, const Tensor& input, const Tensor& ret) {
@@ -491,7 +498,22 @@ public:
         return {expert_ids, expert_token_num};
     }
 
-    vector<Tensor> slice_dim0(const Tensor& h, vector<size_t>& lengths, bool copy) {
+    tuple<vector<int>, vector<size_t>> filter_active_experts(const vector<int>& all_load) {
+        vector<int> expert_ids;
+        vector<size_t> expert_token_num;
+        for (int i = 0; i < num_experts_may_share; ++i) {
+            if (!is_local_expert(i) || all_load[i] == 0) {
+                continue; // Skip NOT local experts
+            }
+            int local_exp = local_expert_id(i);
+            expert_ids.push_back(local_exp);
+            expert_token_num.push_back(all_load[i]);
+        }
+        return {expert_ids, expert_token_num};
+    }
+
+    template<class LenT>
+    vector<Tensor> slice_dim0(const Tensor& h, vector<LenT>& lengths, bool copy) {
         vector<Tensor> results;
         results.reserve(lengths.size());
         size_t offset = 0;
@@ -528,6 +550,11 @@ public:
         int seq_len) {
         vector<vector<int>> group_token_idx(num_experts_may_share);
         const int seq_len_top_k = seq_len * top_k_may_share;
+        if (seq_len >= 1024) {
+            for (size_t i = 0; i < num_experts_may_share; ++i) {
+                group_token_idx[i].reserve(32);
+            }
+        }
         BM_ASSERT_LE(seq_len_top_k, routing_experts.size(), "seq_len_top_k out of range");
         bool out_of_range = false;
         for (int i = 0; i < seq_len_top_k; ++i) {
@@ -559,13 +586,99 @@ public:
         }
     }
 
-    Tensor forward(const core::Context& ctx, const Tensor& input, bool quant_back) override {
-        int event_level = 3;
+    Tensor forward_gpu_dispatch(const core::Context& ctx, const Tensor& input, bool quant_back) {
+        int event_level = 2;
         size_t total_seq_len = input.size(0);
         const Tensor& h = input;
 
         // (num_tokens, top_k_may_share)
-        auto [routing_experts_t, routing_weights_t] = route(ctx, h, dyn_shared);
+        auto [routing_experts_t, routing_weights_t, all_load_t] = route(ctx, input, dyn_shared);
+        vector<int> all_loads = all_load_t.to_vector<int>(ctx.current_cuda_stream());
+        int* rank_loads = &all_loads[num_experts_may_share];
+
+        auto [local_experts, expert_token_num] = filter_active_experts(all_loads);
+        size_t rank_load = rank_loads[ctx.rank()];
+        size_t sum_token_num = std::accumulate(expert_token_num.begin(), expert_token_num.end(), 0UL);
+        BM_ASSERT_EQ(sum_token_num, rank_load, "rank_load");
+        if (rank_load == 0) {
+            // in expert parallel mode, and not any local experts hits, return immediately
+            return forward_shared_or_zero(ctx, input);
+        }
+
+        Tensor flat_exp_ids = routing_experts_t.view({routing_experts_t.numel()});
+        ctx.recordEvent("arange", event_level);
+        Tensor range = functions::arange(ctx, 0, flat_exp_ids.numel());
+
+        Tensor flat_exp_ids1 = flat_exp_ids;
+        bool sort_by_rank = exp_parallel && ctx.world_size() > 1;
+        if (sort_by_rank) {
+            ctx.recordEvent("plus_for_sort", event_level);
+            flat_exp_ids1 = plus_for_sort(ctx, flat_exp_ids, num_experts_may_share);
+        }
+        ctx.recordEvent("sort_pair_1d", event_level);
+        auto [ignore, idxs] = functions::sort_pair_1d(ctx, flat_exp_ids1, range, num_experts_may_share * 2);
+
+        int local_start = std::accumulate(rank_loads, rank_loads + ctx.rank(), 0);
+        Tensor local_idxs = idxs;
+        if (exp_parallel && ctx.world_size() > 1)
+            local_idxs = idxs.slice_dim0_len(local_start, rank_load);
+        ctx.recordEvent("divide", event_level);
+        Tensor sorted_tokens = functions::divide(ctx, local_idxs, float(top_k_may_share));
+
+        ctx.recordEvent("calc_reverse_idx", event_level);
+        Tensor rev_idx = calc_reverse_idx(ctx, routing_experts_t, idxs, all_loads, num_experts_may_share, sort_by_rank);
+
+        Tensor h_reorder = h;
+        if (exp_parallel && total_seq_len > 1) {
+            ctx.recordEvent("h_reorder", event_level);
+            h_reorder = functions::index_select(ctx, h, 0, sorted_tokens);
+            ctx.recordEvent("End>h_reorder", event_level);
+        }
+
+        vector<Tensor> expert_inputs = slice_dim0(h_reorder, expert_token_num, total_seq_len == 1);
+        // Note: sparse MOE may consume too much memory
+        vector<Tensor> expert_ret(num_experts_may_share); // GLOBAL (because routing_weights_t is global)
+
+        {
+            int d = ctx.event_level();
+            ctx.set_event_level(d - 1);
+            // loop over all the expert towers
+            for (size_t j = 0; j < local_experts.size(); ++j) {
+                int local_exp = local_experts[j];
+                int global_exp = global_expert_id(local_exp);
+
+                ctx.recordEvent("experts" + std::to_string(global_exp), event_level);
+                expert_ret[global_exp] = experts[local_exp]->forward(ctx, expert_inputs[j], true);
+            }
+            ctx.set_event_level(d);
+        }
+        h_reorder = Tensor(); // free memory
+
+        ctx.recordEvent("sum_experts", event_level);
+        Tensor ret = sum_experts(
+            ctx,
+            expert_ret,
+            Tensor(),
+            routing_experts_t,
+            rev_idx,
+            routing_weights_t,
+            exp_parallel,
+            ctx.world_size(),
+            ctx.rank());
+
+        return with_share(ctx, input, ret);
+    }
+
+    Tensor forward(const core::Context& ctx, const Tensor& input, bool quant_back) override {
+        int event_level = 3;
+        size_t total_seq_len = input.size(0);
+        const Tensor& h = input;
+        if (total_seq_len > gpu_dispatch_thres) {
+            return forward_gpu_dispatch(ctx, input, quant_back);
+        }
+
+        // (num_tokens, top_k_may_share)
+        auto [routing_experts_t, routing_weights_t, _] = route(ctx, h, dyn_shared);
         vector<int> routing_experts(total_seq_len * top_k_may_share);
         ctx.recordEvent("exp_ids_to_buffer", event_level);
         BM_ASSERT_EQ(routing_experts.size(), routing_experts_t.numel(), "");
@@ -574,7 +687,7 @@ public:
         // num_experts_may_share of [routed tokens to this expert] (could be empty)
         vector<vector<int>> all_expert_tokens = dispatch_token(ctx, h,routing_experts, total_seq_len);
         // permute input for LOCAL experts
-        auto [h_reorder, rev_idx_d] = permute_input(ctx, h, routing_experts, all_expert_tokens, total_seq_len);
+        auto [h_reorder, idx_d, rev_idx_d] = permute_input(ctx, h, routing_experts, all_expert_tokens, total_seq_len);
 
         auto [local_experts, expert_token_num] = filter_active_experts(all_expert_tokens);
         size_t sum_token_num = std::accumulate(expert_token_num.begin(), expert_token_num.end(), 0UL);
@@ -750,7 +863,7 @@ public:
 
         BM_ASSERT_EQ(input.ndim(), 2, "");
         // (num_token, top_k_may_share)
-        auto [expert_ids, expert_weights] = route(ctx, input, dyn_shared);
+        auto [expert_ids, expert_weights, _] = route(ctx, input, dyn_shared);
 
         auto[qw1, qz1, scales1, sym1] = all_in->get_gptq_weights(); // nExp * ...
         auto[qw2, qz2, scales2, sym2] = all_gated->get_gptq_weights();
@@ -902,7 +1015,7 @@ public:
         // for un-pad
         padded_block_idx = all.slice_dim0_len(local_tokens_k + total_tokens_k, local_tokens_k);
 
-        functions::scatter_update_dim0(ctx, grouped_input, padded_block_idx, input, group_idx_d);
+        functions::scatter_update_dim0(ctx, grouped_input,  padded_block_idx, input, group_idx_d);
         if (ctx.debug() > 1 && ctx.is_layer(3)) {
             std::cout << "check_equal\n";
 //            std::cout << "exp_tokens: " << exp_tokens << endl;
@@ -946,7 +1059,9 @@ public:
         size_t total_seq_len = input.size(0);
         const Tensor& h = input;
         // (num_token, top_k_may_share)
-        auto [ids_t, weights] = route(ctx, h, dyn_shared); // may include shared
+        auto [ids_t, weights, expert_load] = route(ctx, h, dyn_shared); // may include shared
+        if (ctx.event_level() >= event_level) cudaStreamSynchronize(ctx.current_cuda_stream());
+        long ts = bmengine::logger::get_time_us();
         vector<int> routing_experts(total_seq_len * top_k_may_share);
         ctx.recordEvent("exp_ids_to_buffer", event_level);
         BM_ASSERT_EQ(routing_experts.size(), ids_t.numel(), "");
@@ -956,7 +1071,7 @@ public:
         vector<vector<int>> all_expert_tokens = dispatch_token(ctx, h,routing_experts, total_seq_len);
         // permute input for LOCAL experts
         // h_reorder: exp1 tokens, exp3 tokens...
-        auto [h_reorder, rev_idx_d] = permute_input(ctx, h, routing_experts, all_expert_tokens, total_seq_len);
+        auto [h_reorder, idx_d, rev_idx_d] = permute_input(ctx, h, routing_experts, all_expert_tokens, total_seq_len);
 
         auto [local_experts, expert_token_num] = filter_active_experts(all_expert_tokens);
         size_t sum_token_num = std::accumulate(expert_token_num.begin(), expert_token_num.end(), 0UL);
@@ -977,6 +1092,7 @@ public:
         Tensor padded_block_idx;
         Tensor reverse_idx_d;
         vector<int> exp_num_tokens;
+        ctx.recordEvent("get_grouped_input", event_level);
         get_grouped_input(ctx, input, routing_experts, all_expert_tokens,
                           grouped_input, m_indices, padded_block_idx, reverse_idx_d, exp_num_tokens);
 
@@ -1058,7 +1174,7 @@ FeedForward::FeedForward(
         } else {
             ptr = new impl::MOEImpl(ctx, cfg, quant_config, parallel);
         }
-        add_submodule("router", ptr->router);
+        add_submodule("router", ptr->router.get());
         for (int i = 0; i < ptr->num_local_experts; ++i) {
             auto p = ptr->experts[i];
             int exp_id = ptr->global_expert_id(i);
