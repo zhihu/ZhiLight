@@ -209,7 +209,8 @@ public:
     const int world_size;
     const int local_rank;
 
-    Linear router;
+    DataType router_dtype;
+    std::shared_ptr<Linear> router;
     Tensor e_score_correction_bias;
 
     std::vector<NormalImpl*> experts;  // local experts if EP mode; all rank append shared experts if dyn_shared
@@ -277,7 +278,12 @@ public:
         if (topk_method == "noaux_tc") {
             e_score_correction_bias = ctx.parameter({size_t(num_experts)}, dtype);
         }
-        router.set_output_type(core::DataType::kFloat);
+
+        router_dtype = dtype;
+        if (utils::get_int_env("MOE_ROUTER_FLOAT")) router_dtype = DataType::kFloat;
+        router = std::make_shared<Linear>(ctx, dim_model, num_experts, "", 0, false, false, false, DistLayout::ROW, router_dtype);
+        router->set_output_type(core::DataType::kFloat);
+
         BM_CUDART_ASSERT(cudaHostAlloc(&pin_buf, MAX_SEQ_LEN * sizeof(int) * 4, 0));
     }
 
@@ -411,7 +417,8 @@ public:
     //   exp_weight (num_token, top_k_may_share)
     std::tuple<Tensor, Tensor, Tensor> route(const core::Context& ctx, const Tensor& input, bool with_shared=false) {
         // ctx.recordEvent("router_logits", 3);
-        Tensor logit = router.forward(ctx, input); // (total_seq_len, n_experts)
+        Tensor input1 = functions::typecast(ctx, input, router_dtype);
+        Tensor logit = router->forward(ctx, input1); // (total_seq_len, n_experts)
         ctx.recordEvent("top_k_softmax", 2);
         Tensor exp_ids, exp_weights;
         size_t top_k_ext = with_shared ? top_k_may_share : top_k;
@@ -567,7 +574,8 @@ public:
             }
         }
         if (out_of_range) {
-            Tensor logit = router.forward(ctx, input);
+            Tensor input1 = functions::typecast(ctx, input, router_dtype);
+            Tensor logit = router->forward(ctx, input1);
             std::cout << "input: " << input << endl;
             std::cout << "logit: " << logit << endl;
             BM_ASSERT(false, "out_of_range");
