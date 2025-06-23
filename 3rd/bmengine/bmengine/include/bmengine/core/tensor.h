@@ -6,7 +6,11 @@
 #include <string>
 #include <vector>
 #include <stdexcept>
+#if defined(__APPLE__)
+#include "../../../../3rd/cuda/include/cuda_runtime.h"
+#else
 #include <cuda_runtime.h>
+#endif
 
 namespace bmengine {
 namespace core {
@@ -117,9 +121,9 @@ public:
     Tensor to_device(int dev_id = -1) const;
 
     template<typename T>
-    std::vector<T> to_vector() const {
+    std::vector<T> to_vector(cudaStream_t stream=0) const {
         std::vector<T> t(nbytes() / sizeof(T));
-        to_buffer(t.data());
+        to_buffer(t.data(), stream);
         return std::move(t);
     }
 

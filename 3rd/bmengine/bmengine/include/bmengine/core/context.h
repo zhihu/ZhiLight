@@ -131,6 +131,7 @@ public:
     bool checking_numerics() const;
     // Create and record cudaEvent_t to measure time and print timeline
     void recordEvent(const std::string& name, int ev_level = 2, float flops = 0) const;
+    int event_level() const;
     void set_event_level(int level) const;
     void print_events();
     std::mutex& log_mutex() const;
@@ -141,6 +142,9 @@ public:
             return std::move(Tensor());
         }
         auto t = tensor(shape, DTD::data_type());
+        if (data.size() != t.numel()) {
+            throw std::runtime_error("data not fit for tensor");
+        }
         t.from_buffer(data.data());
         return std::move(t);
     }
