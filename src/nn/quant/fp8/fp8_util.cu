@@ -232,9 +232,10 @@ core::Tensor dynamic_scaled_quant(
 template<class HALF_T>
 __global__ void KERNEL_per_token_cast_to_fp8(
     const HALF_T *__restrict__ g_in, // (m, n)
-    uint8_t *__restrict__ g_out,    // (m, n)
+    uint8_t *__restrict__ g_out,     // (m, n)
     uint32_t aligned_m,
-    float* scale_ptr // (n/128, aligned_m)
+    float* scale_ptr,                // (n/128, aligned_m)
+    bool scale_col_major
 ) {
     uint32_t N = gridDim.y * 128;
     // each thread process 4 x half
@@ -266,7 +267,9 @@ __global__ void KERNEL_per_token_cast_to_fp8(
     // write 4 X fp8
     *(int*)(g_out + offset) = *(int*)out_fp8;
 
-    size_t offset_scale = blockIdx.y * aligned_m + blockIdx.x;
+    size_t offset_scale = scale_col_major
+        ? (blockIdx.y * aligned_m + blockIdx.x)
+        : (blockIdx.x * gridDim.y + blockIdx.y);
     if (threadIdx.x == 0)
         scale_ptr[offset_scale] = amax / 448.0f;
 }
@@ -281,6 +284,7 @@ __global__ void KERNEL_per_token_cast_to_fp8(
 core::Tensor per_token_cast_to_fp8(
     const core::Context& ctx,
     const core::Tensor& input,
+    bool scale_col_major,
     float MAX_E4M3
 ) {
     const cudaStream_t stream = ctx.current_stream()->ptr;
@@ -293,7 +297,9 @@ core::Tensor per_token_cast_to_fp8(
     core::Tensor out = ctx.tensor(input.shape(), core::DataType::kFP8_E4M3, "", round_up_size);
 
     size_t aligned_m = round_up(m, 16 / sizeof(float));
-    core::Tensor scale = ctx.tensor({n / 128UL, aligned_m}, core::DataType::kFloat);
+    core::Tensor scale = scale_col_major
+        ? ctx.tensor({n / 128UL, aligned_m}, core::DataType::kFloat)
+        : ctx.tensor({aligned_m, n / 128UL}, core::DataType::kFloat);
 
     dim3 block(1024);
     dim3 grid(m, n / 128);
@@ -302,12 +308,12 @@ core::Tensor per_token_cast_to_fp8(
             input.data<scalar_t>(),
             out.data<uint8_t>(),
             aligned_m,
-            scale.mutable_data<float>());
+            scale.mutable_data<float>(),
+            scale_col_major);
     });
     BM_CUDART_ASSERT(cudaGetLastError());
 
-    out.quant_scale = std::make_shared<core::Tensor>();
-    *out.quant_scale = scale;
+    out.set_quant_scale(scale);
     return out;
 }
 

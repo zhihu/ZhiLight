@@ -30,6 +30,9 @@ class Tensor;
 class BMENGINE_EXPORT Tensor {
 public:
     std::shared_ptr<Tensor> quant_scale;
+    void set_quant_scale(const Tensor& scale) {
+        quant_scale = std::make_shared<Tensor>(scale);
+    }
 
 protected:
     friend class Context;
