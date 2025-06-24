@@ -38,7 +38,7 @@ void scatter_update_dim0(
     const core::Tensor& src,
     const core::Tensor& src_index
 ) {
-    BM_ASSERT_EQ(dst.dtype(), src.dtype(), "dtype mismatch");
+    BM_ASSERT_EQ(dst.dtype(), src.dtype(), "src dst dtype mismatch");
     BM_ASSERT_EQ(dst.ndim(), 2, "dst is not 2D");
     BM_ASSERT_EQ(src.ndim(), 2, "src is not 2D");
     BM_ASSERT_EQ(dst.size(-1), src.size(-1), "src and dst have different last dim");
@@ -60,7 +60,7 @@ void scatter_update_dim0(
     DimT num_threads = round_up_thread(D);
     auto stream = ctx.current_stream()->ptr;
 
-    BM_DTYPE_DISPATCH_FLOAT(dst.dtype(), {
+    BM_DTYPE_DISPATCH_FOR_COPY(dst.dtype(), {
         KERNEL_scatter_update_dim0<scalar_t><<<dst_index.numel(), num_threads, 0, stream>>>(
             dst.mutable_data<scalar_t>(),
             dst_index.data<int>(),
@@ -74,6 +74,28 @@ void scatter_update_dim0(
     BM_CUDART_ASSERT(cudaGetLastError());
 }
 
-
+//void scatter_update_dim0(
+//    const core::Context& ctx,
+//    core::Tensor& dst,
+//    const std::vector<int>& dst_index,
+//    const core::Tensor& src,
+//    const std::vector<int>& src_index
+//) {
+//    BM_ASSERT_EQ(src.ndim(), dst.ndim(), "rank mismatch");
+//    BM_ASSERT_EQ(dst_index.size(), src_index.size(), "index size mismatch");
+//    for (int i = 1; i < src.ndim(); ++i) {
+//        BM_ASSERT_EQ(src.size(i), dst.size(i), "shape mismatch");
+//    }
+//    // TODO: fuse kernel
+//    size_t num = dst_index.size();
+//    size_t block_size = src.nbytes() / src.size(0);
+//    auto d2d = cudaMemcpyDeviceToDevice;
+//    auto stream = ctx.current_stream()->ptr;
+//    for (size_t i = 0; i < num; ++i) {
+//        char* dst_ptr = dst.data<char>() + dst_index[i] * block_size;
+//        char* src_ptr = src.data<char>() + src_index[i] * block_size;
+//        BM_CUDART_ASSERT(cudaMemcpyAsync(dst_ptr, src_ptr, block_size, d2d, stream));
+//    }
+//}
 }
 }

@@ -4,6 +4,7 @@
 #include "nn/linear/gemm_grouped.h"
 #include "nn/linear/linear.h"
 #include "model/model_context.h"
+#include "nn/quant/fp8/fp8.h"
 #include "nn/quant/int8/quant_kernel.h"
 #include "nn/quant/gptq/gptq.h"
 #include "utils/env.h"
@@ -970,24 +971,6 @@ public:
         vector<int> active_exp, acc_offset;
         size_t local_tokens_k = filter_concat_exp_tokens(
             exp_tokens, flat_buf_ptr, active_exp, exp_num_tokens, acc_offset);
-#if 0
-        size_t num_block = 0;
-        vector<int> index_in_grouped_input; // (local_tokens_k)
-        vector<int> index_in_input;         // (local_tokens_k)
-        BM_ASSERT_EQ(exp_tokens.size(), num_experts_may_share, "exp_tokens.size() mismatch");
-        for (int exp = 0; exp < num_experts_may_share; ++exp) {
-            if (is_local_expert(exp) && !exp_tokens[exp].empty()) {
-                auto& tokens = exp_tokens[exp];
-                for (int j = 0; j < tokens.size(); ++j) {
-                    index_in_grouped_input.push_back(num_block * block_m + j);
-                }
-                index_in_input.insert(index_in_input.end(), tokens.begin(), tokens.end());
-                local_tokens_k += tokens.size();
-                size_t aligned_m = round_up(tokens.size(), block_m);
-                num_block += aligned_m / block_m;
-            }
-        }
-#endif
 
         if (exp_parallel) {
             if (local_tokens_k == 0) {
@@ -1002,7 +985,14 @@ public:
             total_tokens_aligned += round_up(num, block_m);
         }
         m_indices = fill_m_indices(ctx, total_tokens_aligned, active_exp, exp_num_tokens);
-        grouped_input = ctx.tensor({size_t(total_tokens_aligned), input.size(1)}, input.dtype());
+
+        bool quant = input.size(0) > utils::get_int_env("QUANT_GROUP_THRES", 1);
+        Tensor quant_input;
+        if (quant) {
+            quant_input = nn::fp8::per_token_cast_to_fp8(ctx, input, false);
+        }
+
+        grouped_input = ctx.tensor({size_t(total_tokens_aligned), input.size(1)}, (quant ? quant_input : input).dtype());
         functions::zeros_(ctx, grouped_input);
 
         // build reverse index
@@ -1023,45 +1013,20 @@ public:
         // for un-pad
         padded_block_idx = all.slice_dim0_len(local_tokens_k + total_tokens_k, local_tokens_k);
 
-        functions::scatter_update_dim0(ctx, grouped_input,  padded_block_idx, input, group_idx_d);
-        if (ctx.debug() > 1 && ctx.is_layer(3)) {
-            std::cout << "check_equal\n";
-//            std::cout << "exp_tokens: " << exp_tokens << endl;
-//            std::cout << "group_idx_d: " << group_idx_d << endl;
-//            std::cout << "padded_block_idx: " << padded_block_idx << endl;
-            Tensor reorder = functions::index_select(ctx, input, 0, group_idx_d);
-//            std::cout << "input: " << input << endl;
-//            std::cout << "grouped_input: " << grouped_input << endl;
-//            std::cout << "reorder: " << reorder << endl;
-            Tensor unpad = ctx.tensor(reorder.shape(), reorder.dtype());
-            std::vector<int> seq(unpad.size(0));
-            std::iota(seq.begin(), seq.end(), 0);
-            Tensor seq_d = ctx.tensor_of(seq);
-            functions::scatter_update_dim0(ctx, unpad, seq_d, grouped_input, padded_block_idx);
-//            std::cout << "unpad: " << unpad << endl;
-            functions::check_equal(ctx, reorder, unpad);
-            Tensor unpad1 = functions::index_select(ctx, grouped_input, 0, padded_block_idx);
-            functions::check_equal(ctx, reorder, unpad1);
-            std::cout << "Done check_equal\n";
-        }
+        functions::scatter_update_dim0(ctx, grouped_input,  padded_block_idx, (quant ? quant_input : input), group_idx_d);
 
-//        size_t group_offset = 0;
-//        for (int j = 0; j < exp_num_tokens.size(); ++j) {
-//            // call index_select INPLACE for each expert
-//            int num = exp_num_tokens[j];
-//            Tensor exp_input = grouped_input.slice_dim0_len(group_offset, num);
-//            Tensor idx = group_idx_d.slice_dim0_len(acc_offset[j], num);
-//            functions::index_select(ctx, input, 0, idx, &exp_input);
-//            group_offset += round_up(num, block_m);
-//        }
+        if (quant) {
+            Tensor scale = ctx.tensor({size_t(total_tokens_aligned), quant_input.quant_scale->size(1)},
+                                      quant_input.quant_scale->dtype());  // (x, n/128)
+            functions::zeros_(ctx, scale);
+            functions::scatter_update_dim0(ctx, scale,  padded_block_idx, *quant_input.quant_scale, group_idx_d);
+            scale = functions::Transpose(ctx).forward(ctx, scale);
+            grouped_input.set_quant_scale(scale);
+        }
     }
 
     Tensor forward(const core::Context& ctx, const Tensor& input, bool quant_back) override {
         BM_ASSERT(all_in, "No fused weight");
-//        static int m_threshold = utils::get_int_env("FP8BLOCK_MOE_M_THRES", 0);
-//        if (input.size(0) > m_threshold) {
-//            return FeedForward::impl::MOEImpl::forward(ctx, input, quant_back);
-//        }
 
         int event_level = 3;
         size_t total_seq_len = input.size(0);
@@ -1077,9 +1042,6 @@ public:
 
         // num_experts_may_share of [routed tokens to this expert] (could be empty)
         vector<vector<int>> all_expert_tokens = dispatch_token(ctx, h,routing_experts, total_seq_len);
-        // permute input for LOCAL experts
-        // h_reorder: exp1 tokens, exp3 tokens...
-        auto [h_reorder, idx_d, rev_idx_d] = permute_input(ctx, h, routing_experts, all_expert_tokens, total_seq_len);
 
         auto [local_experts, expert_token_num] = filter_active_experts(all_expert_tokens);
         size_t sum_token_num = std::accumulate(expert_token_num.begin(), expert_token_num.end(), 0UL);
@@ -1108,23 +1070,7 @@ public:
         Tensor w_1 = all_gated->grouped_gemm_fp8_block(ctx, grouped_input, m_indices, experts.size());
         nn::gate_mul_inplace(ctx, w_0, w_1, experts[0]->act_fn_type);
         Tensor w_2 = all_out->grouped_gemm_fp8_block(ctx, w_0, m_indices, experts.size());
-        if (ctx.is_layer(300)) {
-            std::cout << "m_indices: " << m_indices << endl;
-            for (int i = 0; i < w_2.size(0) / block_m; ++i) {
-                std::cout << "Block:" << i << endl;
-                std::cout << "IN:" << grouped_input.slice_dim0_len(i * block_m, block_m) << endl;
-                if (i < 4) {
-                    std::cout << "w_0:" << w_0.slice_dim0_len(i * block_m, block_m) << endl;
-                }
-                std::cout << "OUT:" << w_2.slice_dim0_len(i * block_m, block_m) << endl;
-            }
-        }
         Tensor w_2a = functions::index_select(ctx, w_2, 0, padded_block_idx);
-//        Tensor w_0  = ctx.tensor({padded_block_idx.size(0), in.size(-1)}, in.dtype());
-//        Tensor w_1 = ctx.tensor(w_0.shape(), w_0.dtype());
-//        Tensor w_0 = functions::index_select(ctx, in, 0, padded_block_idx);
-//        Tensor w_1 = functions::index_select(ctx, gated, 0, padded_block_idx);
-//        nn::gate_mul_inplace(ctx, w_0, w_1, experts[0]->act_fn_type);
 
         vector<Tensor> slice_ret = slice_dim0(w_2a, expert_token_num, false);
 
@@ -1133,10 +1079,6 @@ public:
             int local_exp = local_experts[j];
             int global_exp = global_expert_id(local_exp);
             expert_ret[global_exp] = slice_ret[j];
-//            if (ctx.is_layer(3)) {
-//                std::cout << "j=" << j << "global_exp=" << global_exp << endl;
-//                std::cout << "ret: " << slice_ret[j] << endl;
-//            }
         }
 
         ctx.recordEvent("sum_experts", event_level);

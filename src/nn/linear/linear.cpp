@@ -1784,6 +1784,28 @@ public:
         ctx.load_parameter(&weight_scale, prefix + ".weight_scale_inv", state_dict, parallel, dist_layout);
     }
 
+    Tensor quant_input(const core::Context& ctx,
+                       const core::Tensor& input) {
+        Tensor a_quant;
+        if (!input.quant_scale) {
+            ctx.recordEvent("dynamic_scaled_quant", 3);
+            a_quant = nn::fp8::per_token_cast_to_fp8(ctx, input);
+            const_cast<Tensor&>(input).set_quant_scale(a_quant); // cache quantized tensor
+        } else {
+            if (input.dtype() == core::DataType::kFP8_E4M3) {
+                // input SELF is quantized tensor
+                BM_ASSERT(input.quant_scale, "No quant_scale");
+                BM_ASSERT_EQ(input.quant_scale->dtype(), core::DataType::kFloat, "Wrong scale dtype");
+                a_quant = input;
+            } else {
+                // input.quant_scale is quantized tensor (cached)
+                BM_ASSERT_EQ(input.quant_scale->dtype(), core::DataType::kFP8_E4M3, "Wrong fp8 dtype");
+                a_quant = *input.quant_scale;
+            }
+        }
+        return a_quant;
+    }
+
     core::Tensor forward(
         const core::Context& ctx,
         const core::Tensor& input,
@@ -1798,21 +1820,18 @@ public:
         string ev_name = logger::str_cat("[M=", m, "] FP8Block::forward ", prefix);
         core::EventScope ev_scope(ctx, ev_name, ev_level);
 
-        auto& a_quant = input.quant_scale;
-        if (!a_quant) {
-            const_cast<Tensor&>(input).quant_scale = std::make_shared<core::Tensor>();
-            ctx.recordEvent("dynamic_scaled_quant", ev_level);
-            // FIXME: fuse
-            *a_quant = nn::fp8::per_token_cast_to_fp8(ctx, input);
-        } else {
-            BM_ASSERT_EQ(a_quant->dtype(), core::DataType::kFP8_E4M3, "Wrong fp8 dtype");
-        }
+        Tensor q = quant_input(ctx, input);
 
         ctx.recordEvent("gemm_fp8_block", ev_level);
-        Tensor ret = ctx.tensor({m, n}, dtype);
+        if (output) {
+            BM_ASSERT_EQ(output->size(0), m, "");
+            BM_ASSERT_EQ(output->size(1), n, "");
+            BM_ASSERT_EQ(output->dtype(), dtype, "");
+        }
+        Tensor ret = output ? *output : ctx.tensor({m, n}, dtype);
         int ret_code = deep_gemm_fp8_block_h20_group(
-            a_quant->data(),
-            a_quant->quant_scale->data(),
+            q.data(),
+            q.quant_scale->data(),
             weight.data(),
             weight_scale.data(),
             ret.data(),
@@ -1843,20 +1862,13 @@ public:
         string ev_name = logger::str_cat("[M=", m, "] FP8Block::grouped_gemm ", prefix);
         core::EventScope ev_scope(ctx, ev_name, ev_level);
 
-        auto& a_quant = input.quant_scale;
-        if (!a_quant) {
-            const_cast<Tensor&>(input).quant_scale = std::make_shared<core::Tensor>();
-            ctx.recordEvent("dynamic_scaled_quant", ev_level);
-            *a_quant = nn::fp8::per_token_cast_to_fp8(ctx, input);
-        } else {
-            BM_ASSERT_EQ(a_quant->dtype(), core::DataType::kFP8_E4M3, "Wrong fp8 dtype");
-        }
+        Tensor q = quant_input(ctx, input);
 
         ctx.recordEvent("gemm_fp8_block", ev_level);
         Tensor ret = ctx.tensor({m, n}, dtype);
         int ret_code = deep_gemm_fp8_block_h20_group(
-            a_quant->data(),
-            a_quant->quant_scale->data(),
+            q.data(),
+            q.quant_scale->data(),
             weight.data(),
             weight_scale.data(),
             ret.data(),

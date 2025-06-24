@@ -25,6 +25,7 @@ core::Tensor dynamic_scaled_quant(
 core::Tensor per_token_cast_to_fp8(
     const core::Context& ctx,
     const core::Tensor& input,
+    bool scale_col_major=true,
     float MAX_E4M3=448
 );
 

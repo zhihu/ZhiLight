@@ -68,6 +68,23 @@ struct DTypeDeducer<void*> {
         };                                                                                         \
     } while (0)
 
+#define BM_DTYPE_DISPATCH_FOR_COPY(dtype, ...)                                                              \
+    do {                                                                                           \
+        const auto& _dtype = dtype;                                                                \
+        switch (_dtype) {                                                                          \
+            BM_PRIVATE_DTYPE_DISPATCH_CASE(kDouble, double, __VA_ARGS__)                           \
+            case bmengine::core::DataType::kFloat: /* fall through */                              \
+            BM_PRIVATE_DTYPE_DISPATCH_CASE(kInt32, int32_t, __VA_ARGS__)                           \
+            case bmengine::core::DataType::kHalf: /* fall through */                               \
+            case bmengine::core::DataType::kBFloat16: /* fall through */                           \
+            BM_PRIVATE_DTYPE_DISPATCH_CASE(kInt16, int16_t, __VA_ARGS__)                           \
+            case bmengine::core::DataType::kFP8_E4M3: /* fall through */                           \
+            case bmengine::core::DataType::kFP8_E5M2: /* fall through */                           \
+            BM_PRIVATE_DTYPE_DISPATCH_CASE(kInt8, int8_t, __VA_ARGS__)                             \
+            default: BM_EXCEPTION("Unsupported data type");                                        \
+        };                                                                                         \
+    } while (0)
+
 #define BM_DTYPE_DISPATCH_FLOAT(dtype, ...)                                                        \
     do {                                                                                           \
         const auto& _dtype = dtype;                                                                \
