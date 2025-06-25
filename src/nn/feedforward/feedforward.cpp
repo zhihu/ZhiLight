@@ -313,7 +313,7 @@ public:
     size_t filter_concat_exp_tokens(
         const vector<vector<int>>& exp_tokens, // Ragged: (num_experts, seq_len in expert)
         int* flat_buf_ptr,  // out
-        vector<int>& active_exp,
+        vector<int>& active_exp,  // global exp id
         vector<int>& num_tokens,
         vector<int>& acc_offset
     ) const {
@@ -595,44 +595,61 @@ public:
         }
     }
 
+    tuple<Tensor, Tensor>
+    sort_token(const core::Context& ctx,
+               const Tensor& exp_ids, // (len_seq, top_k)
+               int* rank_loads,
+               bool by_rank) const {
+        int event_level = 2;
+        // return sorted tokens by (rank?, exp id, token id)
+        Tensor flat_exp_ids = exp_ids.view({exp_ids.numel()});
+        ctx.recordEvent("arange", event_level);
+        Tensor range = functions::arange(ctx, 0, flat_exp_ids.numel());
+
+        Tensor flat_exp_ids1 = flat_exp_ids;
+        if (by_rank) {
+            ctx.recordEvent("plus_for_sort", event_level);
+            flat_exp_ids1 = plus_for_sort(ctx, flat_exp_ids, num_experts_may_share);
+        }
+        ctx.recordEvent(logger::str_cat("sort_pair_1d,by_rank=", by_rank, ",len=", exp_ids.numel()), event_level);
+        int max_key = num_experts_may_share * (1 + ctx.world_size());
+        auto [ignore, idxs] = functions::sort_pair_1d(ctx, flat_exp_ids1, range, max_key);
+
+        // slice local rank part
+        int local_start = std::accumulate(rank_loads, rank_loads + ctx.rank(), 0);
+        size_t rank_load = rank_loads[ctx.rank()];
+        Tensor local_idxs = idxs;
+        if (exp_parallel && ctx.world_size() > 1)
+            local_idxs = idxs.slice_dim0_len(local_start, rank_load);
+
+        ctx.recordEvent("divide", event_level);
+        Tensor sorted_tokens = functions::divide(ctx, local_idxs, float(top_k_may_share));
+        // Note: sorted_tokens is local, idxs is global
+        return {sorted_tokens, idxs};
+    }
+
     Tensor forward_gpu_dispatch(const core::Context& ctx, const Tensor& input, bool quant_back) {
         int event_level = 2;
         size_t total_seq_len = input.size(0);
         const Tensor& h = input;
 
         // (num_tokens, top_k_may_share)
-        auto [routing_experts_t, routing_weights_t, all_load_t] = route(ctx, input, dyn_shared);
-        vector<int> all_loads = all_load_t.to_vector<int>(ctx.current_cuda_stream());
+        auto [routing_experts_t, routing_weights_t, all_loads_t] = route(ctx, input, dyn_shared);
+        vector<int> all_loads = all_loads_t.to_vector<int>(ctx.current_cuda_stream());
         int* rank_loads = &all_loads[num_experts_may_share];
 
         auto [local_experts, expert_token_num] = filter_active_experts(all_loads);
         size_t rank_load = rank_loads[ctx.rank()];
         size_t sum_token_num = std::accumulate(expert_token_num.begin(), expert_token_num.end(), 0UL);
         BM_ASSERT_EQ(sum_token_num, rank_load, "rank_load");
+
         if (rank_load == 0) {
             // in expert parallel mode, and not any local experts hits, return immediately
             return forward_shared_or_zero(ctx, input);
         }
 
-        Tensor flat_exp_ids = routing_experts_t.view({routing_experts_t.numel()});
-        ctx.recordEvent("arange", event_level);
-        Tensor range = functions::arange(ctx, 0, flat_exp_ids.numel());
-
-        Tensor flat_exp_ids1 = flat_exp_ids;
         bool sort_by_rank = exp_parallel && ctx.world_size() > 1;
-        if (sort_by_rank) {
-            ctx.recordEvent("plus_for_sort", event_level);
-            flat_exp_ids1 = plus_for_sort(ctx, flat_exp_ids, num_experts_may_share);
-        }
-        ctx.recordEvent("sort_pair_1d", event_level);
-        auto [ignore, idxs] = functions::sort_pair_1d(ctx, flat_exp_ids1, range, num_experts_may_share * 2);
-
-        int local_start = std::accumulate(rank_loads, rank_loads + ctx.rank(), 0);
-        Tensor local_idxs = idxs;
-        if (exp_parallel && ctx.world_size() > 1)
-            local_idxs = idxs.slice_dim0_len(local_start, rank_load);
-        ctx.recordEvent("divide", event_level);
-        Tensor sorted_tokens = functions::divide(ctx, local_idxs, float(top_k_may_share));
+        auto [sorted_tokens, idxs] = sort_token(ctx, routing_experts_t, rank_loads, sort_by_rank);
 
         ctx.recordEvent("calc_reverse_idx", event_level);
         Tensor rev_idx = calc_reverse_idx(ctx, routing_experts_t, idxs, all_loads, num_experts_may_share, sort_by_rank);
@@ -917,7 +934,7 @@ public:
     ~FP8BlockMOE() override = default;
 
     void fill_padded_block_idx(
-        const vector<int> exp_num_tokens,
+        const vector<int>& exp_num_tokens,
         int* reverse_idx
     ) {
         int offset = 0;
@@ -1025,12 +1042,122 @@ public:
         }
     }
 
+    // Return grouped input align m to block_m=64
+    void get_grouped_input_gpu(
+        const core::Context& ctx,
+        const Tensor& input,                   // (num_tokens, dim_model)
+        const Tensor& sorted_tokens,           // (num_block * block_m)
+        const Tensor& padded_block_idx,
+        size_t total_tokens_aligned,
+        Tensor& grouped_input                  // (num_block * block_m, dim_model)
+    ) {
+        if (total_tokens_aligned == 0)
+            return;
+
+        bool quant = input.size(0) > utils::get_int_env("QUANT_GROUP_THRES", 1);
+        Tensor quant_input;
+        if (quant) {
+            quant_input = nn::fp8::per_token_cast_to_fp8(ctx, input, false);
+        }
+
+        grouped_input = ctx.tensor({total_tokens_aligned, input.size(1)}, (quant ? quant_input : input).dtype());
+        functions::zeros_(ctx, grouped_input);
+
+        BM_ASSERT_EQ(padded_block_idx.numel(), sorted_tokens.numel(), logger::str_cat("Rank", ctx.rank(), " padded_block_idx.numel() not equal"));
+        functions::scatter_update_dim0(ctx, grouped_input,  padded_block_idx, (quant ? quant_input : input), sorted_tokens);
+
+        if (quant) {
+            Tensor scale = ctx.tensor({total_tokens_aligned, quant_input.quant_scale->size(1)},
+                                      quant_input.quant_scale->dtype());  // (x, n/128)
+            functions::zeros_(ctx, scale);
+            functions::scatter_update_dim0(ctx, scale,  padded_block_idx, *quant_input.quant_scale, sorted_tokens);
+            scale = functions::Transpose(ctx).forward(ctx, scale);
+            grouped_input.set_quant_scale(scale);
+        }
+    }
+
+    Tensor forward_gpu_dispatch(const core::Context& ctx, const Tensor& input, bool quant_back) {
+        int event_level = 2;
+        size_t total_seq_len = input.size(0);
+        const Tensor& h = input;
+
+        // (num_token, top_k_may_share)
+        auto [ids_t, weights, all_loads_t] = route(ctx, h, dyn_shared); // may include shared
+        vector<int> all_loads = all_loads_t.to_vector<int>(ctx.current_cuda_stream());
+        int* rank_loads = &all_loads[num_experts_may_share];
+#ifndef NDEBUG
+        auto [local_experts, expert_token_num] = filter_active_experts(all_loads);
+        size_t rank_load = rank_loads[ctx.rank()];
+        size_t sum_token_num = std::accumulate(expert_token_num.begin(), expert_token_num.end(), 0UL);
+        BM_ASSERT_EQ(sum_token_num, rank_load, "rank_load");
+#endif
+        ctx.recordEvent("fill_m_indices_padded_indices", event_level);
+        auto [m_indices, padded_block_idx, total_tokens_aligned] =
+            fill_m_indices_padded_indices(ctx, all_loads, block_m, num_experts_may_share, exp_parallel);
+
+        // Special case0: not any local experts hits
+        if (total_tokens_aligned == 0) {
+            // in expert parallel mode, and not any local experts hits, return immediately
+            return forward_shared_or_zero(ctx, input);
+        }
+
+        bool sort_by_rank = exp_parallel && ctx.world_size() > 1;
+        auto [sorted_tokens, idxs] = sort_token(ctx, ids_t, rank_loads, sort_by_rank);
+
+        ctx.recordEvent("calc_reverse_idx", event_level);
+        Tensor rev_idx = calc_reverse_idx(ctx, ids_t, idxs, all_loads, num_experts_may_share, sort_by_rank);
+
+
+        // Padding to block_m
+        Tensor grouped_input; // (num_block * block_m, dim_model)
+        vector<int> exp_num_tokens;
+        ctx.recordEvent("get_grouped_input", event_level);
+        get_grouped_input_gpu(ctx, input, sorted_tokens, padded_block_idx, total_tokens_aligned,
+                              grouped_input);
+
+        Tensor w_0 = all_in->grouped_gemm_fp8_block(ctx, grouped_input, m_indices, experts.size());
+        Tensor w_1 = all_gated->grouped_gemm_fp8_block(ctx, grouped_input, m_indices, experts.size());
+        nn::gate_mul_inplace(ctx, w_0, w_1, experts[0]->act_fn_type);
+        Tensor w_2 = all_out->grouped_gemm_fp8_block(ctx, w_0, m_indices, experts.size());
+
+        vector<Tensor> expert_ret(num_experts_may_share); // GLOBAL (because routing_weights_t is global)
+        int slice_offset = 0;
+        for (int exp = 0; exp < num_experts_may_share; ++exp) {
+            int num_tokens = all_loads[exp];
+            if (num_tokens > 0 && is_local_expert(exp)) {
+                int num_aligned = round_up(num_tokens, block_m);
+                expert_ret[exp] = w_2.slice_dim0_len(slice_offset, num_tokens);
+#ifndef NDEBUG
+                functions::check_numeric(ctx, expert_ret[exp]);
+#endif
+                slice_offset += num_aligned;
+            }
+        }
+
+        ctx.recordEvent("sum_experts", event_level);
+        Tensor ret = sum_experts(
+            ctx,
+            expert_ret,
+            Tensor(),
+            ids_t,
+            rev_idx,
+            weights,
+            exp_parallel,
+            ctx.world_size(),
+            ctx.rank());
+        return with_share(ctx, input, ret);
+    }
+
     Tensor forward(const core::Context& ctx, const Tensor& input, bool quant_back) override {
         BM_ASSERT(all_in, "No fused weight");
 
-        int event_level = 3;
+        int event_level = 2;
         size_t total_seq_len = input.size(0);
         const Tensor& h = input;
+        if (total_seq_len > gpu_dispatch_thres) {
+            return forward_gpu_dispatch(ctx, input, quant_back);
+        }
+
         // (num_token, top_k_may_share)
         auto [ids_t, weights, all_loads_t] = route(ctx, h, dyn_shared); // may include shared
         if (ctx.event_level() >= event_level) cudaStreamSynchronize(ctx.current_cuda_stream());

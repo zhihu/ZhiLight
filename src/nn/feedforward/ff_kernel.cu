@@ -20,6 +20,11 @@ using bmengine::core::DataType;
 using bmengine::core::Tensor;
 using model::ModelContext;
 
+template<int MAX_NUM>
+struct InlineInts {
+    int data[MAX_NUM];
+};
+
 #define GELU 1
 #define SILU 2
 
@@ -207,6 +212,7 @@ static __global__ void KERNEL_top_k_softmax(
     for (int i = 0; i < k; ++i) {
         out_v[i] = value[i] / sum_e * weight_scale;
         out_idx[i] = idx[i];
+        assert(idx[i] < num_exp);
     }
 
     if (worker_load) {
@@ -579,6 +585,7 @@ static __global__ void KERNEL_sum_experts_arr(
                 }
                 assert(idx < len);
             }
+            assert(!isnan(float(input[idx * dim_model + d])));
             acc += float(input[idx * dim_model + d]) * w;
         }
     }
@@ -741,6 +748,7 @@ core::Tensor sum_experts(
     return std::move(out);
 }
 
+#define DEBUG_LB 0
 // (seq_len), (1)
 static __global__ void KERNEL_route_shared_lb_v1(
     int* exp_ids,
@@ -763,6 +771,9 @@ static __global__ void KERNEL_route_shared_lb_v1(
             while (true) {
                 if (atomicAdd(&worker_load[rank], 1) < max_load) {
                     int exp_id = (num_local_experts + k - top_k) * world_size + rank;
+#if DEBUG_LB
+                    printf("LB q=%d, k=%d, rank=%d, load=%d, exp=%d\n", q, k, rank, worker_load[rank], exp_id);
+#endif
                     exp_ids[q * top_k_ext + k] = exp_id;
                     atomicAdd(&expert_load[exp_id], 1);
                     // exp_weights[q * top_k_ext + k] = 1;
@@ -776,10 +787,12 @@ static __global__ void KERNEL_route_shared_lb_v1(
     }
 }
 
+#define MAX_WORLD_SIZE 8
 // (seq_len, n_shared), (1)
 static __global__ void KERNEL_route_shared_lb(
     int* exp_ids,
     float* exp_weights,
+    const int* worker_load_base,
     int* worker_load,
     int* expert_load,
     const int max_load,
@@ -792,7 +805,7 @@ static __global__ void KERNEL_route_shared_lb(
     int capacities[9];
     int ranks[9];
     for (int r = 0; r < world_size; ++r) {
-        capacities[r] = worker_load[r] >= max_load ? 0 : max_load - worker_load[r];
+        capacities[r] = worker_load_base[r] >= max_load ? 0 : max_load - worker_load_base[r];
         ranks[r] = r;
     }
 
@@ -812,6 +825,7 @@ static __global__ void KERNEL_route_shared_lb(
     int rank = ranks[r];
     int exp_id = (num_local_experts + s) * world_size + rank;  // fake expert id!
     exp_ids[q * top_k_ext + top_k + s] = exp_id;
+    atomicAdd(&worker_load[rank], 1);
     atomicAdd(&expert_load[exp_id], 1);
 //    if (q == 0) {
 //        printf("offset=%d, exp=%d\n", q * top_k_ext + s, exp_id);
@@ -835,15 +849,19 @@ void route_shared_lb(
     int seq_len = exp_ids.size(0);
     int top_k_ext = exp_ids.size(1);
     int max_load = round_up(exp_ids.numel(), worker_load.numel()) / worker_load.numel();
-    BM_ASSERT_LE(top_k, top_k_ext - 1, "top k too big");
+    BM_ASSERT_LT(top_k, top_k_ext, "top k too big");
+
+    // Make a copy of load, which is CONSTANT during kernel execution.
+    Tensor worker_load_base = ctx.copy(worker_load);
 
     auto stream = ctx.current_stream()->ptr;
     dim3 gridDim(seq_len, top_k_ext - top_k);
     auto kernel = KERNEL_route_shared_lb;
-    if (seq_len == 1) kernel = KERNEL_route_shared_lb_v1;
+//    if (seq_len == 1) kernel = KERNEL_route_shared_lb_v1;
     kernel<<<gridDim, 1, 0, stream>>>(
         exp_ids.data<int>(),
         exp_weights.data<float>(),
+        worker_load_base.data<int>(),
         worker_load.data<int>(),
         expert_load.data<int>(),
         max_load,
@@ -898,11 +916,6 @@ core::Tensor plus_for_sort(
 
     return out;
 }
-
-#define MAX_INLINE_INT 264
-struct InlineInts {
-    void* data[MAX_INLINE_INT];
-};
 
 // (seq_len), (K)
 static __global__ void KERNEL_calc_reverse_idx(
@@ -971,5 +984,99 @@ core::Tensor calc_reverse_idx(
     BM_CUDART_ASSERT(cudaGetLastError());
 
     return rev_indices;
+}
+
+// (max_token_num/block_m, NUM_EXP), (block_m)
+template <int NUM_EXP>
+static __global__ void KERNEL_fill_m_indices_padded_indices_temp(
+    __grid_constant__ const InlineInts<NUM_EXP> num_tokens,
+    __grid_constant__ const InlineInts<NUM_EXP> offsets,
+    __grid_constant__ const InlineInts<NUM_EXP+1> aligned_offsets,
+    int* padded_indices, // pad to block_m(64)
+    int* m_indices
+) {
+    int exp = blockIdx.y;
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
+    if (s < num_tokens.data[exp]) {
+        padded_indices[offsets.data[exp] + s] = aligned_offsets.data[exp] + s;
+    }
+    int s2 = aligned_offsets.data[exp] + s;
+    if (s2 < aligned_offsets.data[exp + 1]) {
+        m_indices[s2] = exp;
+    }
+}
+
+template <int NUM_EXP>
+std::tuple<core::Tensor, core::Tensor, int> fill_m_indices_padded_indices_temp(
+    const core::Context& ctx,
+    const std::vector<int>& all_loads,
+    int block_m,
+    int num_experts,
+    bool exp_parallel
+) {
+    int rank = exp_parallel ? ctx.rank() : 0;
+    int ws = exp_parallel ? ctx.world_size() : 1;
+    InlineInts<NUM_EXP> num_tokens;
+    InlineInts<NUM_EXP> offsets;
+    InlineInts<NUM_EXP+1> aligned_offsets;
+    int max_num_token = 0;
+    int offset = 0;
+    int a_offset = 0;
+    for (int i = 0, j = rank; j < num_experts; i++, j += ws) {
+        int num_token = all_loads[j];
+        if (num_token > max_num_token)
+            max_num_token = num_token;
+
+        num_tokens.data[i] = num_token;
+        offsets.data[i] = offset;
+        aligned_offsets.data[i] = a_offset;
+
+        offset += num_token;
+        a_offset += round_up(num_token, block_m);  // pad to block_m64)
+    }
+    aligned_offsets.data[num_experts/ws] = a_offset;
+    int total_tokens_aligned = a_offset;
+    if (total_tokens_aligned == 0) {
+        return {Tensor(), Tensor(), 0};
+    }
+
+    core::Tensor padded_indices = ctx.tensor({size_t(offset)}, core::DataType::kInt32);
+    core::Tensor m_indices = ctx.tensor({size_t(a_offset)}, core::DataType::kInt32);
+
+    int blocks = (max_num_token + block_m - 1) / block_m;
+    dim3 gridDim(blocks, num_experts / ws);
+    auto stream = ctx.current_cuda_stream();
+    KERNEL_fill_m_indices_padded_indices_temp<NUM_EXP><<<gridDim, block_m, 0, stream>>>(
+        num_tokens,
+        offsets,
+        aligned_offsets,
+        padded_indices.data<int>(),
+        m_indices.data<int>()
+    );
+    BM_CUDART_ASSERT(cudaGetLastError());
+    return {m_indices, padded_indices, total_tokens_aligned};
+}
+
+std::tuple<core::Tensor, core::Tensor, int> fill_m_indices_padded_indices(
+    const core::Context& ctx,
+    const std::vector<int>& all_loads,
+    int block_m,
+    int num_experts,
+    bool exp_parallel
+) {
+    int local_num_experts = exp_parallel ? num_experts / ctx.world_size() : num_experts;
+    auto fn = fill_m_indices_padded_indices_temp<256 + 8>;
+    if (local_num_experts <= 32 + 8) {
+        fn = fill_m_indices_padded_indices_temp<32 + 8>;
+    } else if (local_num_experts <= 64 + 8) {
+        fn = fill_m_indices_padded_indices_temp<64 + 8>;
+    } else if (local_num_experts <= 128 + 8) {
+        fn = fill_m_indices_padded_indices_temp<128 + 8>;
+    } else if (local_num_experts <= 256 + 8) {
+        fn = fill_m_indices_padded_indices_temp<256 + 8>;
+    } else {
+        throw std::runtime_error("num_experts too big");
+    }
+    return fn(ctx, all_loads, block_m, num_experts, exp_parallel);
 }
 }
