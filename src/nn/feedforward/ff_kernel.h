@@ -82,4 +82,12 @@ core::Tensor calc_reverse_idx(
     bool sorted_by_rank
 );
 
+std::tuple<core::Tensor, core::Tensor, int> fill_m_indices_padded_indices(
+    const core::Context& ctx,
+    const std::vector<int>& all_loads,
+    int block_m,
+    int num_experts,
+    bool exp_parallel
+);
+
 }
