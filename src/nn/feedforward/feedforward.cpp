@@ -1032,7 +1032,7 @@ public:
         size_t total_seq_len = input.size(0);
         const Tensor& h = input;
         // (num_token, top_k_may_share)
-        auto [ids_t, weights, expert_load] = route(ctx, h, dyn_shared); // may include shared
+        auto [ids_t, weights, all_loads_t] = route(ctx, h, dyn_shared); // may include shared
         if (ctx.event_level() >= event_level) cudaStreamSynchronize(ctx.current_cuda_stream());
         long ts = bmengine::logger::get_time_us();
         vector<int> routing_experts(total_seq_len * top_k_may_share);
@@ -1070,16 +1070,32 @@ public:
         Tensor w_1 = all_gated->grouped_gemm_fp8_block(ctx, grouped_input, m_indices, experts.size());
         nn::gate_mul_inplace(ctx, w_0, w_1, experts[0]->act_fn_type);
         Tensor w_2 = all_out->grouped_gemm_fp8_block(ctx, w_0, m_indices, experts.size());
+
+        vector<Tensor> expert_ret(num_experts_may_share); // GLOBAL (because routing_weights_t is global)
+
+#if 1 /* Split grouped result */
+        int slice_offset = 0;
+        auto all_loads = all_loads_t.to_vector<int>();
+        for (int exp = 0; exp < num_experts_may_share; ++exp) {
+            int num_tokens = all_loads[exp];
+            if (num_tokens > 0 && is_local_expert(exp)) {
+                int num_aligned = round_up(num_tokens, block_m);
+                expert_ret[exp] = w_2.slice_dim0_len(slice_offset, num_tokens);
+                slice_offset += num_aligned;
+            }
+        }
+#else
+        ctx.recordEvent("index_select w_2", event_level);
         Tensor w_2a = functions::index_select(ctx, w_2, 0, padded_block_idx);
 
         vector<Tensor> slice_ret = slice_dim0(w_2a, expert_token_num, false);
 
-        vector<Tensor> expert_ret(num_experts_may_share); // GLOBAL (because routing_weights_t is global)
         for (size_t j = 0; j < local_experts.size(); ++j) {
             int local_exp = local_experts[j];
             int global_exp = global_expert_id(local_exp);
             expert_ret[global_exp] = slice_ret[j];
         }
+#endif
 
         ctx.recordEvent("sum_experts", event_level);
         Tensor ret = sum_experts(
@@ -1092,6 +1108,7 @@ public:
             exp_parallel,
             ctx.world_size(),
             ctx.rank());
+        ctx.recordEvent("End>sum_experts", event_level);
         return with_share(ctx, input, ret);
     }
 };
