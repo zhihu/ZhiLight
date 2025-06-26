@@ -62,6 +62,27 @@ public:
           dev(ctx.active_device_idx()) {}
     virtual ~impl() = default;
 
+    core::Tensor slice_for_mla(ModelContext& ctx, const core::Tensor& input) {
+        static int reduce_scatter_thres = utils::get_int_env("PROJ_A_DP_THRES", -1);
+        static int data_parallel = utils::get_int_env("ATTN_DATA_PARALLEL", 0);
+        size_t len_q = input.size(0);
+        if (reduce_scatter_thres > 0 && len_q > reduce_scatter_thres) {
+            BM_ASSERT_EQ(input.ndim(), 2, "slice_for_mla: input is not 2D");
+            BM_ASSERT(ctx.dyn_batch(), "slice_for_mla: No dyn batch");
+            ctx.dyn_batch()->input_len_before_dp = len_q;
+            size_t num_s = ctx.dyn_batch()->get_num_search();
+            size_t part_len = ceil_div(len_q, ctx.world_size());
+            size_t begin = ctx.rank() * part_len;
+            size_t end = std::min(len_q, begin + part_len);
+            if (data_parallel == 2 && num_s > 0) {
+                Tensor input_s = input.slice_dim0_len(input.size(0) - num_s, num_s);
+                ctx.dyn_batch()->s_mla_input = ln_attn.forward(ctx, input_s);
+            }
+            return input.slice_dim0(begin, end);
+        }
+        return input;
+    }
+
     virtual core::Tensor forward(
         const core::Context& ctx,
         const core::Tensor& inp,           // (batch, len_q, dim_model)
@@ -75,11 +96,12 @@ public:
         const core::Tensor* block_table,   // (batch, blocks_per_seq)
         const core::Tensor* placement      // (batch, len_q,)    int32
     ) {
-        ModelContext* m_ctx = dynamic_cast<ModelContext*>(const_cast<core::Context*>(&ctx));
+        ModelContext* m_ctx = ModelContext::cast(ctx);
         core::Tensor ret;
 
         if (!mask_modules[0]) {
-            auto ln_out = ln_attn(ctx, inp);
+            Tensor inp1 = m_ctx ? slice_for_mla(*m_ctx, inp) : inp;
+            auto ln_out = ln_attn.forward(ctx, inp1);
             if (m_ctx && m_ctx->is_calc_act_scales()) {
                 m_ctx->update_act_scale(ln_attn.prefix + ".max_out", ln_out);
             }
@@ -96,6 +118,7 @@ public:
                 block_table,
                 placement,
                 nullptr);
+            m_ctx->check_numeric(ret);
             BM_ASSERT_EQ(ret.dtype(), dtype, "dtype mismatch");
             if (parallel)
                 ret = ctx.reduce_sum(ret, dtype);
@@ -111,6 +134,7 @@ public:
                 m_ctx->update_act_scale(ln_ff.prefix + ".max_out", ln_out);
             }
             Tensor ff_out = ff.forward(ctx, ln_out);
+            m_ctx->check_numeric(ff_out);
             if (parallel)
                 ff_out = ctx.reduce_sum(ff_out, dtype);
             element_add_scale_out(ctx, ret, ff_out, ret, 1 / scale, scale_residual); // residual first

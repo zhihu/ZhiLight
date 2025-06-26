@@ -232,18 +232,20 @@ core::Tensor dynamic_scaled_quant(
 template<class HALF_T>
 __global__ void KERNEL_per_token_cast_to_fp8(
     const HALF_T *__restrict__ g_in, // (m, n)
+    uint32_t stride_in,
     uint8_t *__restrict__ g_out,     // (m, n)
+    uint32_t stride_out,
     uint32_t aligned_m,
     float* scale_ptr,                // (n/128, aligned_m)
     bool scale_col_major
 ) {
-    uint32_t N = gridDim.y * 128;
     // each thread process 4 x half
     HALF_T in_h[4];
     float in_f[4];
     // read 4 x half
-    size_t offset = blockIdx.x * N + blockIdx.y * 128 + threadIdx.x * 4;
-    *(double*)&in_h = *(const double*)(g_in + offset);
+    size_t offset1 = blockIdx.x * stride_in + blockIdx.y * 128 + threadIdx.x * 4;
+    size_t offset2 = blockIdx.x * stride_out + blockIdx.y * 128 + threadIdx.x * 4;
+    *(double*)&in_h = *(const double*)(g_in + offset1);
 #pragma unroll
     for (int i = 0; i < 4; i++) {
         in_f[i] = in_h[i];
@@ -265,7 +267,7 @@ __global__ void KERNEL_per_token_cast_to_fp8(
         out_fp8[i] = __nv_fp8_e4m3(in_f[i] * (448.0f / amax));
     }
     // write 4 X fp8
-    *(int*)(g_out + offset) = *(int*)out_fp8;
+    *(int*)(g_out + offset2) = *(int*)out_fp8;
 
     size_t offset_scale = scale_col_major
         ? (blockIdx.y * aligned_m + blockIdx.x)
@@ -306,7 +308,9 @@ core::Tensor per_token_cast_to_fp8(
     BM_DTYPE_DISPATCH_HALF(input.dtype(), {
         KERNEL_per_token_cast_to_fp8<scalar_t><<<grid, 32, 0, stream>>>(
             input.data<scalar_t>(),
+            input.stride(0),
             out.data<uint8_t>(),
+            out.stride(0),
             aligned_m,
             scale.mutable_data<float>(),
             scale_col_major);

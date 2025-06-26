@@ -844,6 +844,22 @@ Tensor Context::reduce_sum(Tensor& data, DataType out_type) const {
     return functions::typecast(*this, data, out_type);
 }
 
+Tensor Context::reduce_scatter(const Tensor& data) const {
+    auto shape = data.shape();  // TODO: check data buffer size0 mod ws
+    shape[0] = ceil_div(shape[0], world_size());
+    Tensor out = tensor(shape, data.dtype());
+    c10d::NCCLReduceScatter(*this, data, out, ncclSum);
+    return out;
+}
+
+Tensor Context::all_gather(const Tensor& data) const {
+    auto shape = data.shape();
+    shape[0] *= world_size();
+    Tensor out = tensor(shape, data.dtype());
+    c10d::NCCLAllGather(*this, data, out);
+    return out;
+}
+
 Tensor Context::cuda(const Tensor& cpu_tensor) const {
     BM_ASSERT_EQ(cpu_tensor.device(), -1, "Not a cpu tensor");
     Tensor out = this->tensor(cpu_tensor.shape(), cpu_tensor.dtype());

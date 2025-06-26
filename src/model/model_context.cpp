@@ -187,14 +187,6 @@ void ReduceContext::wait_peer() {
     }
 }
 
-Tensor ModelContext::all_gather(const Tensor& data) const {
-    auto shape = data.shape();
-    shape[0] *= world_size();
-    Tensor out = tensor(shape, data.dtype());
-    c10d::NCCLAllGather(*this, data, out);
-    return out;
-}
-
 void ModelContext::set_host_reducer(std::shared_ptr<HostAllReducer> reducer) {
     host_reducer_ = std::move(reducer);
     cudaStream_t red_stream;

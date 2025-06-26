@@ -114,6 +114,9 @@ struct DynBatchContext {
     Tensor block_table;
     Tensor tile_scheduler_metadata;
     Tensor num_splits;
+    // for MLA projecting latent DP. i.e. project qkv_a
+    int input_len_before_dp { 0 };
+    Tensor s_mla_input;  // need by MLA DP v2
 
     Tensor get_position_bias_addresses(ModelContext &ctx) {
         std::vector<void *> pb_addrs;
@@ -308,6 +311,10 @@ struct DynBatchContext {
     }
     size_t sum_len_buf() const {
         return std::accumulate(sv_len_buf.begin(), sv_len_buf.end(), 0);
+    }
+
+    size_t get_num_search() const {
+        return s_placement.numel();
     }
 };
 

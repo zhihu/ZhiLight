@@ -155,6 +155,8 @@ public:
     }
 
     virtual Tensor reduce_sum(Tensor& data, DataType out_type) const;
+    virtual Tensor reduce_scatter(const Tensor& data) const;
+    virtual Tensor all_gather(const Tensor& data) const;
 
     int high_precision() const { return high_precision_; }
     void set_high_precision(int level) { high_precision_ = level; }
