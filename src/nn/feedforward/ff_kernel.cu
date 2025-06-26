@@ -702,7 +702,7 @@ core::Tensor sum_experts(
         BM_ASSERT_EQ(weights.numel(), index.numel(), "Wrong reverse_idx size");
     BM_ASSERT_LE(K, MAX_TOP_K, "top k too big");
 
-    core::Tensor out = ctx.tensor({ seq_len, dim_model }, dtype);
+    core::Tensor out = ctx.tensor({ seq_len, dim_model }, dtype, "", dim_model * 16);
 
     size_t threads = round_up_thread(dim_model);
     dim3 gridDim(seq_len, round_up(dim_model, threads) / threads);

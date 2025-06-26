@@ -168,7 +168,6 @@ public:
 
     Tensor reduce_sum(Tensor& data, DataType out_type) const;
     void reduce_sum2(const Tensor& data, Tensor* out, DataType out_type, bool quant = true) const;
-    Tensor all_gather(const Tensor& data) const;
 
     HostAllReducer* create_host_reducer();
     void set_host_reducer(std::shared_ptr<HostAllReducer> reducer);

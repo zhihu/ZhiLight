@@ -34,6 +34,22 @@ using std::vector;
 typedef std::vector<size_t> ShapeT;
 typedef std::unique_ptr<Linear> LinearPtr;
 
+Tensor all_gather(model::ModelContext& ctx, Tensor& a, size_t real_len) {
+    auto a_shape = a.shape();
+    size_t part_len = ceil_div(real_len, ctx.world_size());
+    Tensor a1 = a;
+    if (a_shape[0] < part_len) {
+        BM_ASSERT_EQ(ctx.rank() + 1, ctx.world_size(), "Not last rank");
+        a_shape[0] = part_len;
+        // TODO: need copy?
+        a1 = a.view_unchecked(a_shape, a.dtype());
+    }
+    Tensor x = ctx.all_gather(a1).slice_dim0(0, real_len);
+    BM_CUDART_ASSERT(cudaStreamSynchronize(ctx.current_cuda_stream()));
+    functions::check_numeric(ctx, x);
+    return x;
+}
+
 // clang-format off
 class Attention::impl::MLAImpl : public Attention::impl {
     DataType dtype;
@@ -69,8 +85,8 @@ class Attention::impl::MLAImpl : public Attention::impl {
 
     LinearPtr kv_a_proj_lora; // (hidden_size, kv_lora_rank)T
     LinearPtr k_a_proj_pe; // (hidden_size, pe_head_dim)T
-    LinearPtr k_proj; // (kv_lora_rank, num_heads * nope_head_dim)T
-    LinearPtr v_proj; // (kv_lora_rank, num_heads * v_head_dim)T
+    LinearPtr k_proj; // Split from kv_b_proj. (kv_lora_rank, num_heads * nope_head_dim)T
+    LinearPtr v_proj; // Split from kv_b_proj. (kv_lora_rank, num_heads * v_head_dim)T
 
     LinearPtr qkv_a_proj_with_pe; // (hidden_size, q_lora_rank + kv_lora_rank + pe_head_dim)T
 
@@ -446,6 +462,7 @@ public:
         k_pe = rotary_emb.rotate(ctx, position, k_pe);
         return functions::concat_tensor(ctx, kv_lora, k_pe);
     }
+    // proj, ln, rotary
     Tensor get_compressed_kv_v2(const core::Context& ctx, const Tensor& h, const Tensor& position) {
         // down => 2D: (len_q, kv_lora_rank + qk_rope_head_dim)
         Tensor compressed_kv = kv_a_proj_with_mqa->forward(ctx, h);
@@ -471,23 +488,37 @@ public:
         Tensor kv = get_compressed_kv_v2(ctx, h, position);
         return {q, kv};
     }
+
+    Tensor project_qkv_a(model::ModelContext& ctx, const Tensor& h) {
+        Tensor a = qkv_a_proj_with_pe->forward(ctx, h);
+        if (ctx.dyn_batch()->input_len_before_dp > 0) {
+            ctx.recordEvent("AllGatherQPVa", 2);
+            a = all_gather(ctx, a, ctx.dyn_batch()->input_len_before_dp);
+            ctx.dyn_batch()->input_len_before_dp = 0;
+        }
+        return a;
+    }
+
     // Return q (num_token, num_heads, nope_head_dim + pe_head_dim), kv if up=true
-    //        q_a_norm (num_token, q_lora_rank), kv if up=false
+    //        q_lora_norm (num_token, q_lora_rank), kv if up=false
     std::pair<Tensor, Tensor> process_compressed_all_v2(
-        const core::Context& ctx, const Tensor& h, const Tensor& position, bool up=true, bool full=false) {
+        model::ModelContext& ctx, const Tensor& h, const Tensor& position, bool up=true, bool full=false) {
         if (!qkv_a_proj_with_pe) {
             BM_ASSERT(up, "Up should be true");
             return process_compressed_all_v1(ctx, h, position, full);
         }
         // step 0: project a for all
-        Tensor a = qkv_a_proj_with_pe->forward(ctx, h);
+        Tensor a = project_qkv_a(ctx, h);
+        // Note len(a) != len(h) if PROJ_A_DP is effect !!!
+        size_t len_q = a.size(0);
+
         Tensor q_a = a.virtual_slice(0, q_lora_rank);
         Tensor kv_a = a.virtual_slice(q_lora_rank, kv_lora_rank);
         Tensor k_pe1 = a.virtual_slice(q_lora_rank + kv_lora_rank, pe_head_dim);
 
         // step 1: layer norm for all
         Tensor q_a_norm = ctx.tensor(q_a.shape(), q_a.dtype());
-        Tensor compressed_kv = ctx.tensor({h.size(0), kv_lora_rank + pe_head_dim}, h.dtype());
+        Tensor compressed_kv = ctx.tensor({len_q, kv_lora_rank + pe_head_dim}, h.dtype());
         Tensor kv_a_norm = compressed_kv.virtual_slice(0, kv_lora_rank);
         Tensor k_pe = compressed_kv.virtual_slice(kv_lora_rank, pe_head_dim);
         LayerNorm::forward_2(ctx, q_a, kv_a, q_a_norm, kv_a_norm, q_a_layernorm.get(), kv_a_layernorm.get());
@@ -505,6 +536,68 @@ public:
 
         return {q, compressed_kv};
     }
+
+    // A bit faster than project_qkv_a(), because layer norm is in DP.
+    std::pair<Tensor, Tensor> process_qkv_down_dp(
+        model::ModelContext& ctx, const Tensor& h, const Tensor& position) {
+        // project in DP.
+        Tensor a = qkv_a_proj_with_pe->forward(ctx, h);
+        // layer norm in DP.
+        Tensor q_a = a.virtual_slice(0, q_lora_rank);
+        Tensor kv_a = a.virtual_slice(q_lora_rank, kv_lora_rank);
+        q_a_layernorm->inplace(ctx, q_a);
+        kv_a_layernorm->inplace(ctx, kv_a);
+        {
+            ctx.recordEvent("AllGatherQPVa", 2);
+            a = all_gather(ctx, a, ctx.dyn_batch()->input_len_before_dp);
+        }
+        // full
+        q_a = a.virtual_slice(0, q_lora_rank);  // Attention! it is virtual!
+//        q_a = functions::slice_last_dim(ctx, a, 0, q_lora_rank);
+        Tensor compressed_kv = functions::slice_last_dim(ctx, a, q_lora_rank, kv_lora_rank + pe_head_dim);
+
+        Tensor k_pe1 = functions::slice_last_dim(ctx, compressed_kv, kv_lora_rank, pe_head_dim);
+        Tensor k_pe = compressed_kv.virtual_slice(kv_lora_rank, pe_head_dim, -1);
+        rotary_emb.rotate(ctx, position, k_pe1, &k_pe);
+
+        ctx.dyn_batch()->input_len_before_dp = 0;  // clear flag
+        return {q_a, compressed_kv};
+    }
+
+    std::pair<Tensor, Tensor> process_qkv_down(
+        model::ModelContext& ctx, const Tensor& h, const Tensor& position) {
+        if (qkv_a_proj_with_pe) {
+            // return q_lora_norm, kv(norm, rotated)
+            if (ctx.dyn_batch()->input_len_before_dp > 0) {
+                return process_qkv_down_dp(ctx, h, position);
+            }
+            return process_compressed_all_v2(ctx, h, position, false, false /*no use*/);
+        } else {
+            BM_ASSERT(q_lora_rank <= 0, "No qkv_a_proj_with_pe");
+            auto kv = get_compressed_kv_v2(ctx, h, position);
+            return {h, kv};
+        }
+    }
+
+    std::pair<Tensor, Tensor>  process_q_up(
+        const core::Context& ctx, const Tensor& qa_or_h, const Tensor& position, bool full, bool rotate_inp=false) {
+        Tensor q;
+        if (q_lora_rank <= 0) {
+            q = (full ? q_proj_full : q_proj)->forward(ctx, qa_or_h);
+        } else {
+            q = (full ? q_b_proj_full : q_b_proj)->forward(ctx, qa_or_h);
+        }
+        q = q.view({q.size(0), q.size(1) / qk_head_dim, qk_head_dim});
+
+        Tensor q_pe = q.virtual_slice(nope_head_dim, pe_head_dim, -1);
+        if (rotate_inp) {
+            rotary_emb.rotate_inplace(ctx, position, q_pe);
+        } else {
+            q_pe = rotary_emb.rotate(ctx, position, q_pe);
+        }
+
+        return {q, q_pe};
+    }
 };
 
 core::Tensor Attention::impl::MLAImpl::forward_compressed_cache(
@@ -514,10 +607,12 @@ core::Tensor Attention::impl::MLAImpl::forward_compressed_cache(
     core::Tensor* output
 ) {
     // Step 0: q
-    auto [q, kv] = process_compressed_all_v2(ctx, hidden_q, position);
+    auto [q_a, kv] = process_qkv_down(ctx, hidden_q, position);
+    auto [q, q_pe] = process_q_up(ctx, q_a, position, false, true);
 
     model::DynBatchContext* dyn_batch = ctx.dyn_batch().get();
-    size_t len_q = hidden_q.numel() / hidden_q.size(-1);
+    BM_ASSERT_EQ(hidden_q.ndim(), 2, "hidden_q.ndim() != 2");
+    size_t len_q = q_a.size(0);
 
     // Encode part
     bool has_encode = !dyn_batch->ev_batch.empty();
@@ -554,6 +649,7 @@ core::Tensor Attention::impl::MLAImpl::forward_compressed_cache(
             std::cout << "SearchCompress: " << attn_out_search << endl;
     }
 
+    // (len_q, num_heads * v_head_dim) => (len_q, hidden_size)
     auto ret = o_proj->forward(ctx, attn_val_g); // (group_len_q, dim_model)
     return ret;
 }

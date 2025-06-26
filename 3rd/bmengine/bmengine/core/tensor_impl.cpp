@@ -189,7 +189,9 @@ std::unique_ptr<TensorImpl> TensorImpl::slice_dim0(size_t from, size_t to) const
 std::unique_ptr<TensorImpl> TensorImpl::virtual_slice(
     size_t from, size_t len, int dim) const {
     dim = normalize_dim(dim);
-    BM_ASSERT_EQ(dim, ndim() - 1, "Support only last dim");
+    if (ndim() != 2) {
+        BM_ASSERT_EQ(dim, ndim() - 1, "Support only last dim");
+    }
     BM_ASSERT_LE(from + len, size(dim), "Out of ramge");
     auto new_size = size();
     new_size[dim] = len;

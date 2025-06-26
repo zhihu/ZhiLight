@@ -23,7 +23,7 @@ void NCCLReduce(
     ncclRedOp_t op,
     int root);
 
-void NCCLReduceScatter(const core::Tensor& sendbuff, core::Tensor& recvbuff, ncclRedOp_t op);
+void NCCLReduceScatter(const core::Context& ctx, const core::Tensor& sendbuff, core::Tensor& recvbuff, ncclRedOp_t op);
 
 void NCCLSend(const core::Context& ctx, const core::Tensor& sendbuff, int peer);
 
