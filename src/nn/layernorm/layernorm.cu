@@ -6,19 +6,20 @@
 namespace nn {
 
 // gridDim (seq_len, 1, batch),     blockDim(1024, 1, 1)
-template<typename T>
-static __global__ void BM_KERNEL(layernorm_rms)(
+template<typename T, typename T_W=T>
+static __global__ void KERNEL_layernorm_rms(
     int dim_model,
     float eps,
-    int input_stride,             // seq_len * dim_model
-    const T* __restrict__ weight, // (dim_model)
-    const T* __restrict__ input,  // (batch, seq_len, dim_model)
-    T* __restrict__ output,        // (batch, seq_len, dim_model)
+    int input_stride,                // seq_len * dim_model
+    const void* __restrict__ weight, // (dim_model)
+    const T* __restrict__ input,     // (batch, seq_len, dim_model)
+    T* __restrict__ output,          // (batch, seq_len, dim_model)
     float scale,
     T* input2 = nullptr,
     T* out_sum = nullptr
 ) {
     extern __shared__ float smem[];
+    const T_W* weight_t = reinterpret_cast<const T_W*>(weight);
 
     int batch_id = blockIdx.z;
     int offset = batch_id * input_stride + blockIdx.x * dim_model;
@@ -36,17 +37,17 @@ static __global__ void BM_KERNEL(layernorm_rms)(
     local_sqr_sum = functions::blockReduceSum<float>(local_sqr_sum) / (float) dim_model;
     local_sqr_sum = rsqrtf(local_sqr_sum + eps);
     for (int i = threadIdx.x; i < dim_model; i += blockDim.x) {
-        output[offset + i] = T(smem[i] * local_sqr_sum * float(weight[i]) / scale);
+        output[offset + i] = T(smem[i] * local_sqr_sum * float(weight_t[i]) / scale);
     }
 }
 
 // gridDim (seq_len, 1, batch),     blockDim(1024, 1, 1)
-template<typename T>
+template<typename T, typename T_W=T>
 static __global__ void KERNEL_layer_norm_std(
     int dim_model,
     float eps,
     int input_stride,             // seq_len * dim_model
-    const T* __restrict__ weight, // (dim_model)
+    const void* __restrict__ weight, // (dim_model)
     const T* __restrict__ input,  // (batch, seq_len, dim_model)
     T* __restrict__ output,       // (batch, seq_len, dim_model)
     float scale,
@@ -55,6 +56,7 @@ static __global__ void KERNEL_layer_norm_std(
 ) {
      functions::SharedMemory<T> shared;
      T* smem = shared.getPointer();
+    const T_W* weight_t = reinterpret_cast<const T_W*>(weight);
 
     size_t batch_id = blockIdx.z;
     size_t offset = batch_id * input_stride + blockIdx.x * size_t(dim_model);
@@ -74,7 +76,7 @@ static __global__ void KERNEL_layer_norm_std(
     local_sqr_sum = functions::blockReduceSum<float>(local_sqr_sum) / float(dim_model);
     local_sqr_sum = rsqrtf(local_sqr_sum + eps);
     for (int i = threadIdx.x; i < dim_model; i += blockDim.x) {
-        output[offset + i] = T((float(smem[i]) - mean) * local_sqr_sum * float(weight[i]));
+        output[offset + i] = T((float(smem[i]) - mean) * local_sqr_sum * float(weight_t[i]));
     }
 }
 
@@ -97,7 +99,10 @@ __host__ void layernorm(
     dim3 blockDim(min(round_up(dim_model, 32), 1024), 1, 1);
 
     BM_DTYPE_DISPATCH_FLOAT(input.dtype(), {
-        auto kernel = BM_KERNEL(layernorm_rms)<scalar_t>;
+        auto kernel = KERNEL_layernorm_rms<scalar_t, scalar_t>;
+        if (weight.dtype() == core::DataType::kFloat) {
+            kernel = KERNEL_layernorm_rms<scalar_t, float>;
+        }
         int smem_size = dim_model * sizeof(float);
         if (!rms) {
             kernel = KERNEL_layer_norm_std<scalar_t>;
@@ -112,7 +117,7 @@ __host__ void layernorm(
             dim_model,
             eps,
             input_stride,
-            weight.data<scalar_t>(),
+            weight.data(),
             input.data<scalar_t>(),
             output->mutable_data<scalar_t>(),
             scale,
@@ -123,21 +128,24 @@ __host__ void layernorm(
     BM_CUDART_ASSERT(cudaGetLastError());
 }
 
-// gridDim (seq_len),     blockDim(1024)
-template<typename T>
+// gridDim (seq_len, batch?),     blockDim(1024)
+template<typename T, typename T_W=T>
 static __device__ __inline__ void DEV_layernorm(
-    const T* __restrict__ input,  // (seq_len, dim_model)
-    T* __restrict__ output,  // (seq_len, dim_model)
-    const T* __restrict__ weight, // (dim_model)
+    const T* __restrict__ input,     // (batch?, seq_len, dim_model)
+    T* __restrict__ output,          // (batch?, seq_len, dim_model)
+    const void* __restrict__ weight, // (dim_model)
     int stride_in,
     int stride_out,
     int dim_model,
     float eps,
-    float scale
+    float scale,
+    size_t batch_stride_in = 0,
+    size_t batch_stride_out = 0
 ) {
     extern __shared__ float smem[];
+    const T_W* weight_t = reinterpret_cast<const T_W*>(weight);
 
-    size_t offset = size_t(blockIdx.x) * stride_in;
+    size_t offset = blockIdx.y * batch_stride_in + size_t(blockIdx.x) * stride_in;
     float local_sqr_sum = 0;
     for (int i = threadIdx.x; i < dim_model; i += blockDim.x) {
         float v = float(input[offset + i]);
@@ -147,25 +155,29 @@ static __device__ __inline__ void DEV_layernorm(
     local_sqr_sum = functions::blockReduceSum<float>(local_sqr_sum) / (float) dim_model;
     local_sqr_sum = rsqrtf(local_sqr_sum + eps);
 
-    offset = size_t(blockIdx.x) * stride_out;
+    offset = blockIdx.y * batch_stride_out + size_t(blockIdx.x) * stride_out;
     for (int i = threadIdx.x; i < dim_model; i += blockDim.x) {
-        output[offset + i] = T(smem[i] * local_sqr_sum * float(weight[i]) / scale);
+        output[offset + i] = T(smem[i] * local_sqr_sum * float(weight_t[i]) / scale);
     }
 }
 
 // gridDim (seq_len),     blockDim(1024)
-template<typename T>
+template<typename T, typename T_W=T>
 static __global__ void KERNEL_layernorm_new(
     const T* __restrict__ input,  // (seq_len, dim_model)
     T* __restrict__ output,  // (seq_len, dim_model)
-    const T* __restrict__ weight, // (dim_model)
+    const void* __restrict__ weight, // (dim_model)
     int stride_in,
     int stride_out,
     int dim_model,
     float eps,
-    float scale
+    float scale,
+    size_t batch_stride_in,
+    size_t batch_stride_out
 ) {
-    DEV_layernorm(input, output, weight, stride_in, stride_out, dim_model, eps, scale);
+    DEV_layernorm<T, T_W>(
+        input, output, weight, stride_in, stride_out, dim_model, eps, scale,
+        batch_stride_in, batch_stride_out);
 }
 
 // gridDim (seq_len, 2),     blockDim(1024)
@@ -216,11 +228,13 @@ public:
         const core::Context& ctx,
         const core::Tensor& input // (batch, seq_len, dim_model)
     ) {
-        BM_ASSERT(input.dtype() == weight.dtype(), "dtype mismatch");
+        if (weight.dtype() != core::DataType::kFloat) {
+            BM_ASSERT(input.dtype() == weight.dtype(), "dtype mismatch");
+        }
         BM_ASSERT_EQ(input.size(-1), weight.size(0), "dim mismatch");
         BM_ASSERT(input.ndim() >= 2, "input.ndim() must be >= 2");
         BM_ASSERT(input.device() == weight.device(), "Input and weight must be on the same device");
-        core::Tensor output = ctx.tensor(input.shape(), input.dtype());
+        core::Tensor output = ctx.tensor(input.shape(), input.dtype(), "ln_out", 16 * input.size(-1));
         BM_ASSERT(
             output.device() == weight.device(), "Output and weight must be on the same device");
         layernorm(input, weight, &output, eps, scale, rms, ctx.current_stream()->ptr);
@@ -249,28 +263,39 @@ public:
         const core::Context& ctx,
         core::Tensor& input // (seq_len, dim_model)
     ) {
-        BM_ASSERT(input.dtype() == weight.dtype(), "dtype mismatch");
+        if (weight.dtype() != core::DataType::kFloat) {
+            BM_ASSERT(input.dtype() == weight.dtype(), "dtype mismatch");
+        }
         BM_ASSERT_EQ(input.size(-1), weight.size(0), "dim mismatch");
-        BM_ASSERT(input.ndim() == 2, "input.ndim() must be >= 2");
+        BM_ASSERT(input.ndim() == 2 || input.ndim() == 3, "input.ndim() must be >= 2");
 
+        int batch = input.ndim() == 3 ? input.size(0) : 1;
+        int batch_stride = input.ndim() == 3 ? input.stride(0) : 0;
         int seq_len = input.size(-2);
         int stride = input.stride(-2);
         int dim_model = input.size(-1);
 
         int threads = round_up_thread(dim_model);
+        dim3 gridDim(seq_len, batch);
         int smem_size = dim_model * sizeof(float);
         auto stream = ctx.current_stream()->ptr;
 
         BM_DTYPE_DISPATCH_HALF(input.dtype(), {
-            KERNEL_layernorm_new<scalar_t><<<seq_len, threads, smem_size, stream>>>(
+            auto kernel = KERNEL_layernorm_new<scalar_t>;
+            if (weight.dtype() == core::DataType::kFloat) {
+                kernel = KERNEL_layernorm_new<scalar_t, float >;
+            }
+            kernel<<<gridDim, threads, smem_size, stream>>>(
                 input.data<scalar_t>(),
                 input.data<scalar_t>(),
-                weight.data<scalar_t>(),
+                weight.data(),
                 stride,
                 stride,
                 dim_model,
                 eps,
-                scale
+                scale,
+                batch_stride,
+                batch_stride
             );
         });
         BM_CUDART_ASSERT(cudaGetLastError());
@@ -400,7 +425,7 @@ core::Tensor LayerNorm::fuse_add(const core::Context& ctx, const core::Tensor& x
 }
 
 void LayerNorm::inplace(const core::Context& ctx, core::Tensor& x) {
-    BM_ASSERT_EQ(x.ndim(), 2, "");
+    // BM_ASSERT_EQ(x.ndim(), 2, "");
     size_t M = x.numel() / x.size(-1);
     core::EventScope event_scope(ctx, "LayerNorm[M=" + std::to_string(M) + "]");
     return pimpl->inplace(ctx, x);
@@ -419,6 +444,7 @@ void LayerNorm::forward_2(
     auto eps = lb->pimpl->eps;
     auto scale = lb->pimpl->scale;
     BM_ASSERT_EQ(x.ndim(), 2, "");
+    BM_ASSERT_EQ(y.ndim(), 2, "");
     BM_ASSERT(x.dtype() == weight_a.dtype(), "dtype mismatch");
     BM_ASSERT_EQ(x.size(0), y.size(0), "seq_len mismatch");
     BM_ASSERT_EQ(x.size(-1), weight_a.size(0), "dim mismatch");
@@ -471,6 +497,14 @@ void LayerNorm::load_state_dict(
         auto name = prefix + ".weight";
         ctx.load_parameter(&p->weight, name, state_dict, true, core::DistLayout::ROW);
     } else {
+        auto name = prefix + ".weight";
+        auto it = state_dict.find(name);
+        BM_ASSERT(it != state_dict.end(), "param " + name + " not found in state_dict");
+        auto& param = it->second;
+        if (param.dtype() == core::DataType::kFloat) {
+            pimpl->weight = ctx.tensor(pimpl->weight.shape(), core::DataType::kFloat);
+        }
+
         core::Layer::load_state_dict(ctx, state_dict, prefix, allow_missing);
     }
 }

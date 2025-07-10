@@ -1,5 +1,6 @@
 #include "nn/block/block_kernel.h"
 #include "nn/quant/int8/quant_kernel.h"
+#include <bmengine/logger/std_log_op.hpp>
 
 namespace nn {
 
@@ -22,6 +23,7 @@ void element_add_scale_out(
     core::Tensor& c,
     float scale,
     bool scale_residual) {
+    BM_ASSERT_EQ(a.shape(), b.shape(), "a,b shape mismatch");
     size_t n = a.numel();
     if (b.dtype() == core::DataType::kInt8) {
         int event_level = ctx.current_layer() == 300 && ctx.rank() == 0  ? 0 : 2;

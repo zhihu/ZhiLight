@@ -94,8 +94,8 @@ static Tensor concat2_dim0(const core::Context& ctx, Tensor& a, Tensor& b) {
     return concat_dim0(ctx, {&a, &b}, false);
 }
 static Tensor concat3_dim0(const core::Context& ctx, Tensor& q, Tensor& k, Tensor& v) {
-    BM_ASSERT_EQ(q.shape(), k.shape(), "shape mismatch");
-    BM_ASSERT_EQ(q.shape(), v.shape(), "shape mismatch");
+//    BM_ASSERT_EQ(q.shape(), k.shape(), "shape mismatch");
+//    BM_ASSERT_EQ(q.shape(), v.shape(), "shape mismatch");
     if (q.empty()) return {};
     return concat_dim0(ctx, {&q, &k, &v}, false);
 }
@@ -156,6 +156,8 @@ public:
     core::DataType dtype;
     bool has_bias { false };
     std::string prefix;
+    int weight_part_idx {-1 };
+    int weight_part_total {-1 };
 
     impl(uint32_t dim_in, uint32_t dim_out, std::string act_fn, bool w_trans, int quant, DataType dtype, bool parallel)
         : dim_in(dim_in), dim_out(dim_out),
@@ -173,6 +175,8 @@ public:
     virtual vector<impl*> split(const core::Context& ctx, size_t n_split, bool by_out) {
         return {};
     }
+
+    virtual bool support_uncontinuous_input() const { return false; }
 
     virtual core::Tensor forward(
         const core::Context& ctx,
@@ -205,7 +209,11 @@ public:
         throw std::runtime_error("load_parameters for QuantImpl only");
     }
 
-   virtual void load_state_dict(
+    virtual void set_weight_partition(int part, int total) {
+        throw std::runtime_error("Unsupported set_weight_partition");
+    }
+
+    virtual void load_state_dict(
         const core::Context& ctx,
         const std::map<std::string, const core::Tensor>& state_dict,
         const std::string& prefix,
@@ -344,6 +352,11 @@ public:
         return ret;
     }
 
+    void set_weight_partition(int part, int total) override {
+        weight_part_idx = part;
+        weight_part_total = total;
+    }
+
     void load_state_dict(
         const core::Context& ctx,
         const std::map<std::string, const core::Tensor>& state_dict,
@@ -355,7 +368,12 @@ public:
         });
         weight = std::make_unique<Tensor>(ctx.parameter(shape, dtype));
         auto name = prefix + ".weight";
-        ctx.load_parameter(weight.get(), name, state_dict, parallel, dist_layout);
+        if (weight_part_total > 0) {
+            BM_ASSERT(!has_bias, "TODO bias");
+            ctx.load_parameter_part(weight.get(), name, state_dict, dist_layout, weight_part_idx, weight_part_total);
+        } else {
+            ctx.load_parameter(weight.get(), name, state_dict, parallel, dist_layout);
+        }
 
         auto bias_layout = dist_layout == DistLayout::ROW ? DistLayout::COLUMNAR : DistLayout::REPLICATED;
         if (has_bias) {
@@ -376,6 +394,8 @@ public:
 
     core::Tensor& get_weight() { return *weight; }
     core::Tensor get_dequant_weight(const core::Context& ctx) { return *weight; }
+
+    bool support_uncontinuous_input() const override { return true; }
 
     core::Tensor forward(
         const core::Context& ctx,
@@ -1707,18 +1727,26 @@ public:
 
     Fuser weight_fuser() const override {
         return {
-            reinterpret_cast<Fuser::FN_FUSE2>(Fp8Block::fuse),
-            nullptr,
+            reinterpret_cast<Fuser::FN_FUSE2>(Fp8Block::fuse2),
+            reinterpret_cast<Fuser::FN_FUSE3>(Fp8Block::fuse3),
             Fp8Block::fuse_dim0
         };
     }
 
-    static Fp8Block* fuse(const core::Context& ctx, Fp8Block& a, Fp8Block& b) {
+    static Fp8Block* fuse2(const core::Context& ctx, Fp8Block& a, Fp8Block& b) {
         uint32_t dim_out = a.dim_out + b.dim_out;
         auto* ret = new Fp8Block(
             ctx, a.dim_in, dim_out, a.act_fn_type, a.quant, a.dtype, a.parallel, a.dist_layout);
         ret->weight = concat2_dim0(ctx, a.weight, b.weight);
         ret->weight_scale = concat2_dim0(ctx, a.weight_scale, b.weight_scale);
+        return ret;
+    }
+    static Fp8Block* fuse3(const core::Context& ctx, Fp8Block& a, Fp8Block& b, Fp8Block& c) {
+        uint32_t dim_out = a.dim_out + b.dim_out;
+        auto* ret = new Fp8Block(
+            ctx, a.dim_in, dim_out, a.act_fn_type, a.quant, a.dtype, a.parallel, a.dist_layout);
+        ret->weight = concat3_dim0(ctx, a.weight, b.weight, c.weight);
+        ret->weight_scale = concat3_dim0(ctx, a.weight_scale, b.weight_scale, c.weight_scale);
         return ret;
     }
 
@@ -1774,14 +1802,24 @@ public:
         return *reinterpret_cast<vector<impl*>*>(&results);
     }
 
+    void set_weight_partition(int part, int total) override {
+        weight_part_idx = part;
+        weight_part_total = total;
+    }
+
     void load_state_dict(
         const core::Context& ctx,
         const std::map<std::string, const core::Tensor>& state_dict,
         const std::string& prefix,
         bool allow_missing) override {
         this->prefix = prefix;
-        ctx.load_parameter(&weight, prefix + ".weight", state_dict, parallel, dist_layout);
-        ctx.load_parameter(&weight_scale, prefix + ".weight_scale_inv", state_dict, parallel, dist_layout);
+        if (weight_part_total > 0) {
+            ctx.load_parameter_part(&weight, prefix + ".weight", state_dict, dist_layout, weight_part_idx, weight_part_total);
+            ctx.load_parameter_part(&weight_scale, prefix + ".weight_scale_inv", state_dict, dist_layout, weight_part_idx, weight_part_total);
+        } else {
+            ctx.load_parameter(&weight, prefix + ".weight", state_dict, parallel, dist_layout);
+            ctx.load_parameter(&weight_scale, prefix + ".weight_scale_inv", state_dict, parallel, dist_layout);
+        }
     }
 
     Tensor quant_input(const core::Context& ctx,
@@ -1806,6 +1844,8 @@ public:
         return a_quant;
     }
 
+    bool support_uncontinuous_input() const override { return true; }
+
     core::Tensor forward(
         const core::Context& ctx,
         const core::Tensor& input,
@@ -1828,7 +1868,7 @@ public:
             BM_ASSERT_EQ(output->size(1), n, "");
             BM_ASSERT_EQ(output->dtype(), dtype, "");
         }
-        Tensor ret = output ? *output : ctx.tensor({m, n}, dtype);
+        Tensor ret = output ? *output : ctx.tensor({m, n}, dtype, "", 8 * n);
         int ret_code = deep_gemm_fp8_block_h20_group(
             q.data(),
             q.quant_scale->data(),
@@ -1989,6 +2029,10 @@ core::Tensor Linear::forward(
     size_t flops = 2UL * K * M * N;
     core::EventScope event_scope(ctx, ev_name, 2, flops);
 
+    if (!pimpl->support_uncontinuous_input()) {
+        BM_ASSERT(input.is_continuous(), "uncontinuous_input is not supported");
+    }
+
     Tensor ret;
     if (input.ndim() == 2) {
         ret = pimpl->forward(ctx, input, output_name, quant_back, output);
@@ -2123,7 +2167,7 @@ void Linear::set_has_bias(bool b) {
 
 void Linear::dequant_cache_weight(core::Context& ctx, const core::Tensor& fake_input) {
     auto gptq_ptr = dynamic_cast<impl::Int4GPTQ*>(pimpl.get());
-    model::ModelContext* m_ctx = dynamic_cast<model::ModelContext*>(&ctx);
+    model::ModelContext* m_ctx = model::ModelContext::cast(ctx);
     if (gptq_ptr && m_ctx) {
         gptq_ptr->dequant_cache_weight(*m_ctx, fake_input);
     }
@@ -2137,5 +2181,13 @@ core::Tensor Linear::grouped_gemm_fp8_block(
     auto ptr = dynamic_cast<impl::Fp8Block*>(pimpl.get());
     BM_ASSERT(ptr, "Not Fp8Block impl");
     return ptr->grouped_gemm(ctx, input, m_indices, num_groups);
+}
+
+// When num_kv_heads < TP; we load parameter of specified partition.
+void Linear::set_weight_partition(int part, int total) {
+    pimpl->set_weight_partition(part, total);
+}
+bool Linear::support_uncontinuous_input() const {
+    return pimpl->support_uncontinuous_input();
 }
 }
