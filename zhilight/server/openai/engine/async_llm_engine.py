@@ -219,7 +219,7 @@ class AsyncLLMEngine:
             if first:
                 stats.first_token_time = current_iter_time
                 stats.first_scheduled_time = handler.task.get_first_schedule_ts() * 1e-6 
-                stats.time_in_queue = handler.task.get_time_in_queuegs() * 1e-6
+                stats.time_in_queue = handler.task.get_time_in_queue() * 1e-6
                 stats.input_tokens_num = handler.input_tokens_num
                 first = False
             stats.output_tokens_num = sum(handler.output_tokens_nums)
