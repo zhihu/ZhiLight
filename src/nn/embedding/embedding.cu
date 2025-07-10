@@ -312,10 +312,15 @@ public:
         auto it = state_dict.find(prefix + ".weight");
         BM_ASSERT(it != state_dict.end(), "Weight not found: " + prefix + ".weight");
         auto part_src =it->second.slice_dim0(begin, std::min(end, vocab_size));
-        weight = ctx.tensor({part_size, dim_model}, dtype);
+        auto load_dtype = dtype;
+        if (part_src.dtype() == core::DataType::kFloat && utils::get_int_env("EMBEDDING_AUTO_CAST")) {
+            load_dtype = core::DataType::kFloat;
+        }
+        weight = ctx.tensor({part_size, dim_model}, load_dtype);
         functions::zeros_(ctx, weight);
         auto weight_t = weight.slice_dim0(0, part_src.size(0));
         ctx.assign_or_copy(&weight_t, &part_src);
+        weight = functions::typecast(ctx, weight, dtype);
 
 //        auto weight_t = ctx.tensor({round_size, dim_model}, dtype);
 //        functions::zeros_(ctx, weight_t);
@@ -464,8 +469,12 @@ void RawEmbedding::load_state_dict(
     const std::string& prefix,
     bool allow_missing) {
     auto row_ptr = dynamic_cast<impl::RowParallelImpl*>(pimpl.get());
+    auto norm_ptr = dynamic_cast<impl::NormalImpl*>(pimpl.get());
     if (row_ptr) {
         row_ptr->load_state_dict(ctx, state_dict, prefix, allow_missing);
+    } else if (utils::get_int_env("EMBEDDING_AUTO_CAST") > 0) {
+        core::Layer::load_param_cast(
+            ctx, state_dict, prefix + ".weight", &norm_ptr->weight, core::DataType::kFloat);
     } else {
         core::Layer::load_state_dict(ctx, state_dict, prefix, allow_missing);
     }

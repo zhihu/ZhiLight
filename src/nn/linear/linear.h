@@ -73,6 +73,11 @@ public:
         const core::Tensor& input,
         const core::Tensor& m_indices,
         int num_groups);
+
+    // When num_kv_heads < TP; we load parameter of specified partition.
+    void set_weight_partition(int part, int total);
+
+    bool support_uncontinuous_input() const;
 };
 
 core::Tensor concat_dim0(const core::Context& ctx, std::vector<core::Tensor*> tensors, bool stack=true);

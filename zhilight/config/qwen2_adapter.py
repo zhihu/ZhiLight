@@ -8,7 +8,7 @@ class Qwen2Adapter:
     @staticmethod
     def adapt(config: dict):
         if config["num_hidden_layers"] in [48, 28] and config["hidden_size"] in [5120, 3584]:
-            m_size = '14b' if config["hidden_size"] == 48 else '7b'
+            m_size = '14b' if config["num_hidden_layers"] == 48 else '7b'
             print(f"##### Adapt qwen2 {m_size} config ########")
             set_envs({
                 CHUNKED_PREFILL: 1,

@@ -201,6 +201,9 @@ void ModelContext::set_host_reducer(std::shared_ptr<HostAllReducer> reducer) {
 #pragma GCC push_options
 #pragma GCC optimize ("O0")
 Tensor ModelContext::reduce_sum(Tensor& data, DataType out_type) const {
+    if (world_size() == 1) {
+        return functions::typecast(*this, data, out_type);
+    }
     core::EventScope ev(*this, "AllReduce", 1, data.nbytes());
     Tensor output = tensor(data.shape(), data.dtype());
     static int host_reduce_thres = utils::get_int_env("HOST_REDUCE_THRES", 128);
@@ -218,7 +221,7 @@ Tensor ModelContext::reduce_sum(Tensor& data, DataType out_type) const {
 void ModelContext::reduce_sum2(const Tensor& data, Tensor* out, DataType out_type, bool quant) const {
     static int int8_thres = utils::get_int_env("REDUCE_TP_INT8_THRES", INT_MAX);
     static int direct_alloc = utils::get_int_env("BM_DIRECT_MEM_ALLOC", 0);
-    if (quant && data.size(0) > int8_thres && world_size() > 1 && get_compute_capability() > 80) {
+    if (quant && data.size(0) > int8_thres && world_size() > 1 && get_compute_capability() == 89) {
         reduce_tp_int8(data, out_type, out);
         return;
     }

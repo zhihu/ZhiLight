@@ -18,6 +18,7 @@
 #include <iostream>
 
 #include <cuda_runtime.h>
+#include <cmath>
 
 namespace nn {
 
@@ -58,6 +59,7 @@ public:
     std::unique_ptr<Linear> linear_qkv;
     std::unique_ptr<LayerNorm> q_norm;
     std::unique_ptr<LayerNorm> k_norm;
+    bool qk_norm_on_head { false };
 
     functions::Gemm gemm_attn;
     functions::Gemm gemm_transB;
@@ -84,7 +86,7 @@ public:
           dtype(cfg.dtype),
           parallel(parallel),
           pos_bias_type(cfg.pos_bias_type),
-          attn_scale(1. / sqrtf(dim_head)),
+          attn_scale(1. / sqrt(dim_head)),
           quant_kv(as_quant_kv(quant)),
           scale_weights(cfg.scale_weights),
           weight_transposed(cfg.weight_transposed),
@@ -105,7 +107,11 @@ public:
             project_k.set_has_bias(true);
             project_v.set_has_bias(true);
         }
-        if (cfg.use_qk_norm) {
+        if (cfg.model_type == "qwen3" || cfg.model_type == "qwen3_moe") {
+            qk_norm_on_head = true;
+            q_norm = std::make_unique<LayerNorm>(ctx, dim_head, false, cfg.eps, 1, dtype);
+            k_norm = std::make_unique<LayerNorm>(ctx, dim_head, false, cfg.eps, 1, dtype);
+        } else if (cfg.use_qk_norm) {
             q_norm = std::make_unique<LayerNorm>(ctx, dim_head * num_heads, false, cfg.eps, 1, dtype, num_heads);
             k_norm = std::make_unique<LayerNorm>(ctx, dim_head * num_kv_heads, false, cfg.eps, 1, dtype, num_kv_heads);
         }
@@ -116,9 +122,19 @@ public:
             }
             int ws = ctx.world_size();
             BM_ASSERT(num_heads % ws == 0, "num_heads must be dividable by world_size");
-            BM_ASSERT(num_kv_heads % ws == 0,"num_kv_heads must be dividable by world_size");
-            this->num_heads = num_heads / ctx.world_size();
-            this->num_kv_heads = num_kv_heads / ctx.world_size();
+            this->num_heads /= ws;
+            if (num_kv_heads < ws && utils::get_int_env("ATTN_KV_REP_TP", 0)) {
+                BM_ASSERT_EQ(ws % num_kv_heads, 0, "ctx.world_size() % num_kv_heads != 0");
+                int total = int(num_kv_heads);
+                int part = ctx.rank() / (ws / total);
+                project_k.set_weight_partition(part, total);
+                project_v.set_weight_partition(part, total);
+                this->num_kv_heads = 1;
+                num_head_groups = this->num_heads;
+            } else {
+                BM_ASSERT(num_kv_heads % ws == 0,"num_kv_heads must be dividable by world_size");
+                this->num_kv_heads /= ws;
+            }
         }
         max_shared_memory = ctx.get_max_shared_memory();
     }
@@ -850,6 +866,15 @@ Tensor Attention::impl::NormalImpl::dynamic_batch_forward(
         // fuse Q, K, V
         auto a = linear_qkv->forward(ctx, hidden_q); // (group_len_q, (num_heads + 2 * num_kv_heads) * dim_head)
         BM_ASSERT_EQ(a.size(-1), (num_heads + 2 * num_kv_heads) * dim_head, "");
+        Tensor v_q = a.virtual_slice(0, num_heads * dim_head);
+        Tensor v_k = a.virtual_slice(num_heads * dim_head, num_kv_heads * dim_head);
+        if (q_norm && qk_norm_on_head) {
+            core::EventScope ev(ctx, "QKNorm", 2);
+            v_q = v_q.view_uncontinuous({a.size(0), num_heads, dim_head});
+            v_k = v_k.view_uncontinuous({a.size(0), num_kv_heads, dim_head});
+            q_norm->inplace(ctx, v_q);
+            k_norm->inplace(ctx, v_k);
+        }
         if (dyn_batch->rope_cache.cos.numel() > 0) {
             if (ctx.is_layer(1000)) std::cout << "rope_qk_cache\n";
             rope_qk_cache(ctx,
@@ -877,8 +902,17 @@ Tensor Attention::impl::NormalImpl::dynamic_batch_forward(
         g_h_v = project_v(ctx, hidden_q);   // (group_len_q, num_kv_heads * dim_head)
 
         if (q_norm) {
-            g_h_q = q_norm->forward(ctx, g_h_q);
-            g_h_k = k_norm->forward(ctx, g_h_k);
+            if (qk_norm_on_head) {
+                auto q_shape = g_h_q.shape();
+                auto k_shape = g_h_k.shape();
+                g_h_q = q_norm->forward(ctx, g_h_q.view({g_h_q.size(0), num_heads, dim_head}));
+                g_h_k = k_norm->forward(ctx, g_h_k.view({g_h_k.size(0), num_kv_heads, dim_head}));
+                g_h_q = g_h_q.view(q_shape);
+                g_h_k = g_h_k.view(k_shape);
+            } else {
+                g_h_q = q_norm->forward(ctx, g_h_q);
+                g_h_k = k_norm->forward(ctx, g_h_k);
+            }
         }
         if (pos_bias_type == "rotary") {
             auto h_qk = rotary_embedding(ctx, position_bias, g_h_q, g_h_k);
@@ -1015,10 +1049,12 @@ void Attention::load_state_dict(
     const std::string& prefix,
     bool allow_missing) {
     core::Layer::load_state_dict(ctx, state_dict, prefix, allow_missing);
-    int fuse_pkv = utils::get_int_env("CPM_FUSE_QKV", 0);
+    int fuse_qkv = utils::get_int_env("CPM_FUSE_QKV", 0);
     impl::NormalImpl* p = dynamic_cast<impl::NormalImpl*>(pimpl.get());
-    if (fuse_pkv && p) {
+    if (fuse_qkv && p) {
         auto a = Linear::fuse(ctx, p->project_q, p->project_k, p->project_v);
+        if (ctx.rank() == 0 && prefix.find("layers.0.") != std::string::npos)
+            std::cout << "Fuse Attention QKV " << (a ? "OK." : "Failed !!!") << endl;
         p->linear_qkv = std::unique_ptr<Linear>(a);
     }
     pimpl->on_load(ctx);

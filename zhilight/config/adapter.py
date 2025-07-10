@@ -8,6 +8,7 @@ from .cohere_adapter import CohereAdapter
 from .deepseek_adapter import DeepseekV2Adapter, DeepseekV3Adapter
 from .llama_adapter import LLaMAAdapter
 from .qwen2_adapter import Qwen2Adapter
+from .qwen3_adapter import Qwen3Adapter, Qwen3MOEAdapter
 
 
 def _get_model_type(config: dict):
@@ -38,6 +39,10 @@ class ModelAdapter:
             LLaMAAdapter.adapt(config)
         elif model_type == "qwen2":
             Qwen2Adapter.adapt(config)
+        elif model_type == "qwen3":
+            Qwen3Adapter.adapt(config)
+        elif model_type == "qwen3_moe":
+            Qwen3MOEAdapter.adapt(config)
 
         if get_int_env(CHUNKED_PREFILL) == 1:
             set_env("DUAL_STREAM_THRESHOLD", 100)
