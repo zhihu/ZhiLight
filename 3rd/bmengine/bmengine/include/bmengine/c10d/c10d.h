@@ -1,5 +1,7 @@
 #pragma once
+#ifdef ENABLE_NCCL_TP
 #include <nccl.h>
+#endif
 #include "bmengine/core/tensor.h"
 #include "bmengine/core/context.h"
 
@@ -7,7 +9,9 @@ namespace bmengine {
 
 namespace c10d {
 
+#ifdef ENABLE_NCCL_TP
 ncclDataType_t dtype2nccl(core::DataType dtype);
+#endif
 
 void NCCLAllGather(const core::Context& ctx, const core::Tensor& sendbuff, core::Tensor& recvbuff);
 void NCCLAllReduce(

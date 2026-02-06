@@ -20,6 +20,7 @@ class BMENGINE_EXPORT Engine {
 
 public:
     Engine(const std::vector<DeviceConfiguration>& dev_cfg, const DistConfiguration& dist_cfg);
+    Engine(const std::vector<DeviceConfiguration>& dev_cfg): Engine(dev_cfg, {}) {}
     ~Engine();
 
     Context create_context(const std::vector<int>& devices) const;

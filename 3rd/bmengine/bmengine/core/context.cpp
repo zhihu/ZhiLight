@@ -673,6 +673,7 @@ Tensor Context::distribute_parameter(const Tensor& param, DistLayout layout) con
     if (rank() != 0) {
         local = tensor(param.shape(), param.dtype());
     }
+#ifdef ENABLE_NCCL_TP
     BM_NCCL_ASSERT(ncclBroadcast(
         param.data<void*>(),
         local.mutable_data<void*>(),
@@ -684,7 +685,7 @@ Tensor Context::distribute_parameter(const Tensor& param, DistLayout layout) con
     if (layout == DistLayout::REPLICATED) {
         return local;
     }
-
+#endif
     std::vector<int> gather_indices(shard_len);
     int offset = rank() * shard_len;
     for (int i = 0; i < shard_len; ++i) {

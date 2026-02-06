@@ -36,7 +36,6 @@ class CMakeBuild(build_ext):
         cmake_generator = os.environ.get("CMAKE_GENERATOR", "")
 
         # Set Python_EXECUTABLE instead if you use PYBIND11_FINDPYTHON
-        # EXAMPLE_VERSION_INFO shows you how to pass a value into the C++ code
         # from Python.
         cmake_args = [
             f"-DCMAKE_CXX_STANDARD=17",
@@ -47,24 +46,11 @@ class CMakeBuild(build_ext):
             f"-DWITH_TESTING={testing_cfg}",
         ]
 
-        # zhilight can be compiled with various versions of g++ and CUDA,
-        # only use standard toolchain in packaging container.
-        if os.path.exists("/opt/rh/devtoolset-7/root/bin/gcc"):
-            cmake_args.extend(
-                [
-                    f"-DCMAKE_C_COMPILER=/opt/rh/devtoolset-7/root/bin/gcc",
-                    f"-DCMAKE_CXX_COMPILER=/opt/rh/devtoolset-7/root/bin/g++",
-                    f"-DCMAKE_CUDA_COMPILER=/usr/local/cuda-11.1/bin/nvcc",
-                ]
-            )
         build_args = [f"--target {ext.target}"]
         # Adding CMake arguments set as environment variable
         # (needed e.g. to build for ARM OSx on conda-forge)
         if "CMAKE_ARGS" in os.environ:
             cmake_args += [item for item in os.environ["CMAKE_ARGS"].split(" ") if item]
-
-        # In this example, we pass in the version to C++. You might not need to.
-        cmake_args += [f"-DEXAMPLE_VERSION_INFO={self.distribution.get_version()}"]
 
         # Using Ninja-build since it a) is available as a wheel and b)
         # multithreads automatically. MSVC would require all variables be

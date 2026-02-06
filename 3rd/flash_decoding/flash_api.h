@@ -15,8 +15,11 @@
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #endif
 
-#include <ATen/cuda/CUDAGraphsUtils.cuh> // For at::cuda::philox::unpack
+#include <cuda_runtime.h>
 
+#ifdef USE_FLASH_NS
+namespace flash {
+#endif
 constexpr int TOTAL_DIM = 0;
 constexpr int H_DIM = 1;
 constexpr int D_DIM = 2;
@@ -234,3 +237,6 @@ inline int num_splits_heuristic(int batch_nheads_mblocks, int num_SMs, int num_n
     }
     return 1;
 }
+#ifdef USE_FLASH_NS
+}
+#endif

@@ -12,6 +12,9 @@ namespace nn {
 using std::vector;
 using bmengine::core::DataType;
 using bmengine::functions::transpose_2_1;
+#ifdef USE_FLASH_NS
+using namespace flash;
+#endif
 
 FlashDecoding::FlashDecoding(const Context& ctx) {
     BM_CUDART_ASSERT(cudaGetDeviceProperties(&dprops, ctx.active_device()));
@@ -76,7 +79,8 @@ FlashDecoding::Tensor FlashDecoding::mha_fwd(
     // bool is_sm75 = dprops->major == 7 && dprops->minor == 5;
     bool is_sm8x = dprops.major == 8 && dprops.minor >= 0;
     bool is_sm90 = dprops.major == 9 && dprops.minor == 0;
-    BM_ASSERT(is_sm90 || is_sm8x, "FlashAttention only supports Ampere GPUs or newer.");
+    bool is_sm110 = dprops.major == 11 && dprops.minor == 0;
+    BM_ASSERT(is_sm90 || is_sm8x || is_sm110, "FlashAttention only supports Ampere GPUs or newer.");
     // We will support Turing in the near future
     // TORCH_CHECK(is_sm90 || is_sm8x || is_sm75, "FlashAttention only supports Turing GPUs or newer.");
 
@@ -84,7 +88,7 @@ FlashDecoding::Tensor FlashDecoding::mha_fwd(
     BM_ASSERT(q_dtype == DataType::kHalf || q_dtype == DataType::kBFloat16,
                 "FlashAttention only support fp16 and bf16 data type");
     if (q_dtype == DataType::kBFloat16) {
-        BM_ASSERT(is_sm90 || is_sm8x, "bfloat16 is only supported on Ampere GPUs or newer");
+        BM_ASSERT(is_sm90 || is_sm8x || is_sm110, "bfloat16 is only supported on Ampere GPUs or newer");
     }
     BM_ASSERT(k.dtype() == q_dtype, "query and key must have the same dtype");
     BM_ASSERT(v.dtype() == q_dtype, "query and value must have the same dtype");
@@ -214,13 +218,13 @@ FlashDecoding::Tensor FlashDecoding::mha_varlen_fwd(const Context &ctx,
     // bool is_sm75 = dprops->major == 7 && dprops->minor == 5;
     bool is_sm8x = dprops.major == 8 && dprops.minor >= 0;
     bool is_sm90 = dprops.major == 9 && dprops.minor == 0;
-    BM_ASSERT(is_sm90 || is_sm8x, "FlashAttention only supports Ampere GPUs or newer.");
-
+    bool is_sm110 = dprops.major == 11 && dprops.minor == 0;
+    BM_ASSERT(is_sm90 || is_sm8x || is_sm110, "FlashAttention only supports Ampere GPUs or newer.");
     auto q_dtype = q.dtype();
     BM_ASSERT(q_dtype == DataType::kHalf || q_dtype == DataType::kBFloat16,
                 "FlashAttention only support fp16 and bf16 data type");
     if (q_dtype == DataType::kBFloat16) {
-        BM_ASSERT(is_sm90 || is_sm8x, "bfloat16 is only supported on Ampere GPUs or newer");
+        BM_ASSERT(is_sm90 || is_sm8x || is_sm110, "bfloat16 is only supported on Ampere GPUs or newer");
     }
     BM_ASSERT(k.dtype() == q_dtype, "query and key must have the same dtype");
     BM_ASSERT(v.dtype() == q_dtype, "query and value must have the same dtype");
