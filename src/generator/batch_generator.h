@@ -12,11 +12,14 @@
 #include <thread>
 #include <queue>
 #include <vector>
+
+#ifdef ENABLE_DIST_INFER
 #include <boost/archive/binary_oarchive.hpp>
 #include <boost/archive/binary_iarchive.hpp>
 #include <boost/serialization/vector.hpp>
 #include <boost/serialization/map.hpp>
 #include <boost/serialization/shared_ptr.hpp>
+#endif
 
 namespace batch_generator {
 
@@ -53,6 +56,7 @@ struct SearchTask_ {
 
     std::map<int, float> logit_bias;
 
+#ifdef ENABLE_DIST_INFER
     friend class boost::serialization::access;
 
     template<class Archive>
@@ -76,6 +80,7 @@ struct SearchTask_ {
         ar & position_delta;
         ar & logit_bias;
     }
+#endif
 
 public:
     void finish(generator::SearchResults&& results);
@@ -89,7 +94,9 @@ public:
     bool is_random() const { return top_p < 1. or top_k > 0; }
 };
 
+#ifdef ENABLE_DIST_INFER
 BOOST_SERIALIZATION_ASSUME_ABSTRACT(SearchTask_);
+#endif
 
 typedef shared_ptr<SearchTask_> SearchTask;
 

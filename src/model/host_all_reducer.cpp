@@ -13,8 +13,10 @@
 #include <mutex>
 #include <numeric>
 #include <thread>
+#if defined(__x86_64__)
 #include <immintrin.h>
 #include <emmintrin.h>
+#endif
 
 namespace model {
 
@@ -25,6 +27,7 @@ using std::vector;
 typedef std::unique_lock<std::mutex> Lock;
 // std::experimental::simd (P0214)
 
+#if defined(__x86_64__)
 #pragma GCC push_options
 #pragma GCC optimize ("O3")
 #pragma GCC target ("avx", "f16c", "avx512f")
@@ -118,6 +121,7 @@ void sum_inplace(half* out, half* a, half* b, half* c, half* d, half* e, half* f
     }
 }
 #pragma GCC pop_options
+#endif
 
 class Synchronizer1 {
     const int num;
@@ -259,6 +263,7 @@ public:
 
     template<class T>
     void sum_up_part(const vector<T*>& buf, int len) {
+#if defined(__x86_64__)
         if (world_size == 2) {
             sum_inplace(buf[2], buf[0], buf[1], len);
         } else if (world_size == 4) {
@@ -268,6 +273,7 @@ public:
         } else {
             throw std::runtime_error("Invalid world size.");
         }
+#endif
     }
 
     template<class T> vector<T*> get_buf(int offset) {

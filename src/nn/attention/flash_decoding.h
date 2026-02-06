@@ -1,7 +1,15 @@
 #pragma once
 #include "bmengine/core/core.h"
 
+#ifdef USE_FLASH_NS
+namespace flash {
+    struct Flash_fwd_params;
+}
+using namespace flash;
+#else
 struct Flash_fwd_params;
+#endif
+
 namespace nn {
 class FlashDecoding : public bmengine::core::Layer {
     BM_LAYER_DEF_PUBLIC(FlashDecoding);

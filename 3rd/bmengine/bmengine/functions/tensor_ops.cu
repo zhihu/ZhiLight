@@ -154,8 +154,9 @@ core::Tensor concat_broadcast_b(
     out_shape[A.ndim() - 1] = dim_out;
     auto out = ctx.tensor(out_shape, A.dtype());
 
-    int threads = round_up_thread(A.size(-1));
+    int threads = round_up_thread(dim_out);
     dim3 gridDim(A.size(0), A.size(1));
+    dim3 blockDim(threads, 1, 1);
 
     auto stream = ctx.current_stream()->ptr;
     BM_DTYPE_DISPATCH(A.dtype(), {

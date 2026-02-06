@@ -17,9 +17,8 @@ file(GLOB_RECURSE TEST_SRC_NN "*.cpp")
 # TODO: better way to share this util file
 list(APPEND TEST_SRC_NN "../../src/py_export/py_utils.cpp")
 
+message("ADD pybind11 module for unittest ${PROJECT_NAME}")
 pybind11_add_module(${PROJECT_NAME} ${TEST_SRC_NN})
-target_compile_definitions(${PROJECT_NAME}
-    PRIVATE VERSION_INFO=${EXAMPLE_VERSION_INFO})
 
 #target_include_directories(${PROJECT_NAME} PRIVATE ${Python_SITELIB}/torch/include)
 

@@ -1,11 +1,15 @@
 #pragma once
 
-#include "zmq.hpp"
 #include <iostream>
 #include <string>
 #include <sstream>
+#include <stdexcept>
+
+#ifdef ENABLE_DIST_INFER
+#include "zmq.hpp"
 #include <boost/archive/binary_iarchive.hpp>
 #include <boost/archive/binary_oarchive.hpp>
+#endif
 
 namespace bmengine {
 namespace c10d {
@@ -23,6 +27,7 @@ public:
             buffer_.resize(4 * 1024 * 1024); // 4M
         
             if (nnodes_ > 1) {
+#ifdef ENABLE_DIST_INFER
                 ctx_ = new zmq::context_t(1);
                 if (node_rank == 0) {
                     sock_ = new zmq::socket_t(*ctx_, ZMQ_REP);
@@ -41,19 +46,25 @@ public:
                     sock_->recv(&msg);
                     std::cout << "Node node_rank=" << node_rank_ << " connected to " << addr_ << std::endl;
                 }
+#else
+                throw std::runtime_error("ENABLE_DIST_INFER is not on for multi nodes.");
+#endif
             }
         }
 
     ~HostCommunicator() {
         if (nnodes_ > 1) {
+#ifdef ENABLE_DIST_INFER
             sock_->close();
             delete sock_;
             delete ctx_;
+#endif
         }
     }
 
     template<typename T>
     void broadcast_data(T &obj_or_buf, int nbytes = 0) {
+#ifdef ENABLE_DIST_INFER
         if (nnodes_ == 1) {
             return;
         }
@@ -95,6 +106,7 @@ public:
                 ia >> obj_or_buf;
             }
         }
+#endif
     }
 
     inline int get_nnodes() const {
@@ -110,8 +122,10 @@ private:
     int nnodes_;
     int node_rank_;
 
+#ifdef ENABLE_DIST_INFER
     zmq::context_t *ctx_;
     zmq::socket_t *sock_;
+#endif
 
     std::vector<char> buffer_;
 };

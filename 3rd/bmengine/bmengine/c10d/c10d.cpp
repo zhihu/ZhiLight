@@ -6,6 +6,7 @@
 namespace bmengine {
 namespace c10d {
 
+#ifdef ENABLE_NCCL_TP
 ncclDataType_t dtype2nccl(core::DataType dtype) {
     switch (dtype) {
         case core::DataType::kInt8: return ncclInt8;
@@ -143,5 +144,58 @@ int NCCLCommUserRank(const core::Context& ctx) {
     BM_NCCL_ASSERT(ncclCommUserRank(ctx.current_comm(), &rank));
     return rank;
 }
+
+#else
+void NCCLAllGather(const core::Context& ctx, const core::Tensor& sendbuff, core::Tensor& recvbuff) {
+    throw std::runtime_error("ENABLE_NCCL_TP is off");
+}
+void NCCLAllReduce(
+    const core::Context& ctx, const core::Tensor& sendbuff, core::Tensor& recvbuff, ncclRedOp_t op) {
+    throw std::runtime_error("ENABLE_NCCL_TP is off");
+}
+
+void NCCLBroadcast(
+    const core::Context& ctx, const core::Tensor& sendbuff, core::Tensor& recvbuff, int root) {
+    throw std::runtime_error("ENABLE_NCCL_TP is off");
+}
+
+void NCCLReduce(
+    const core::Context& ctx,
+    const core::Tensor& sendbuff,
+    core::Tensor& recvbuff,
+    ncclRedOp_t op,
+    int root) {
+    throw std::runtime_error("ENABLE_NCCL_TP is off");
+}
+
+void NCCLReduceScatter(const core::Context& ctx, const core::Tensor& sendbuff, core::Tensor& recvbuff, ncclRedOp_t op) {
+    throw std::runtime_error("ENABLE_NCCL_TP is off");
+}
+
+void NCCLSend(const core::Context& ctx, const core::Tensor& sendbuff, int peer) {
+    throw std::runtime_error("ENABLE_NCCL_TP is off");
+}
+
+void NCCLRecv(const core::Context& ctx, core::Tensor& recvbuff, int peer) {
+    throw std::runtime_error("ENABLE_NCCL_TP is off");
+}
+
+void NCCLGroupStart() {
+    throw std::runtime_error("ENABLE_NCCL_TP is off");
+}
+void NCCLGroupEnd() {
+    throw std::runtime_error("ENABLE_NCCL_TP is off");
+}
+void NCCLGroupEndCheck(ncclComm_t comm) {
+    throw std::runtime_error("ENABLE_NCCL_TP is off");
+}
+int NCCLCommCount(const core::Context& ctx) {
+    throw std::runtime_error("ENABLE_NCCL_TP is off");
+}
+int NCCLCommUserRank(const core::Context& ctx) {
+    throw std::runtime_error("ENABLE_NCCL_TP is off");
+}
+
+#endif
 } // namespace c10d
 } // namespace bmengine

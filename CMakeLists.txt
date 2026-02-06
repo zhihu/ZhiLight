@@ -22,7 +22,6 @@ set(CMAKE_VISIBILITY_INLINES_HIDDEN 0)
 set(CMAKE_BUILD_RPATH ${ORIGIN})
 set(CMAKE_INSTALL_RPATH ${ORIGIN})
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/)
-set(USE_STATIC_NCCL True)
 
 message("CUDA Version: ${CMAKE_CUDA_COMPILER_TOOLKIT_VERSION}")
 
@@ -42,13 +41,14 @@ else()
 endif()
 
 option(WITH_TESTING "Compile zhilight with unit testing" ON)
-
-if(WITH_TESTING)
-	execute_process(
-		COMMAND ${PYTHON_EXECUTABLE} -c "import torch; \
-			print(int(torch._C._GLIBCXX_USE_CXX11_ABI))"
-		OUTPUT_VARIABLE PYTORCH_CXX_ABI
-		OUTPUT_STRIP_TRAILING_WHITESPACE
+option(WITH_TORCH "Compile zhilight with torch" ON)
+# Note: torch is implicitly depended by flash-attn
+if(WITH_TORCH)
+    execute_process(
+        COMMAND ${PYTHON_EXECUTABLE} -c "import torch; \
+            print(int(torch._C._GLIBCXX_USE_CXX11_ABI))"
+        OUTPUT_VARIABLE PYTORCH_CXX_ABI
+        OUTPUT_STRIP_TRAILING_WHITESPACE
         # COMMAND_ECHO STDERR
         COMMAND_ERROR_IS_FATAL ANY)
     list(APPEND CMAKE_CXX_FLAGS "-D_GLIBCXX_USE_CXX11_ABI=${PYTORCH_CXX_ABI}")
@@ -61,7 +61,6 @@ string(REPLACE "-DNDEBUG" "" CMAKE_CUDA_FLAGS_RELWITHDEBINFO "${CMAKE_CUDA_FLAGS
 
 message(STATUS "CMAKE_INSTALL_RPATH: ${CMAKE_INSTALL_RPATH}")
 
-include(bmengine)
 add_subdirectory(3rd/bmengine)
 
 execute_process(
@@ -70,11 +69,6 @@ execute_process(
 	OUTPUT_VARIABLE pybind11_DIR
 	OUTPUT_STRIP_TRAILING_WHITESPACE)
 find_package(pybind11 REQUIRED)
-
-find_package(Boost 1.71.0 REQUIRED COMPONENTS serialization)
-if(NOT Boost_FOUND OR NOT TARGET Boost::serialization)
-    message(FATAL_ERROR "Could not find required component Boost::serialization of the Boost library.")
-endif()
 
 file(GLOB_RECURSE BACKEND_SOURCES
     "src/*.cpp"
@@ -87,7 +81,43 @@ list(FILTER BACKEND_SOURCES EXCLUDE REGEX "src/nn/tests/.*$")
 add_library(backend STATIC ${BACKEND_SOURCES})
 set_property(TARGET backend PROPERTY POSITION_INDEPENDENT_CODE ON)
 
+set(BOOST_SERIAL_LIB "")
+if("$ENV{ENABLE_DIST_INFER}" STREQUAL "on")
+    message(STATUS "ENABLE_DIST_INFER=on Need install libboost-serialization-dev")
+    add_definitions(-DENABLE_DIST_INFER=1)
+    find_package(Boost 1.71.0 REQUIRED COMPONENTS serialization)
+    if(NOT Boost_FOUND OR NOT TARGET Boost::serialization)
+        message(FATAL_ERROR "Could not find required component Boost::serialization of the Boost library.")
+    endif()
+    target_include_directories(backend
+        PUBLIC ${Boost_INCLUDE_DIRS}
+    )
+    target_link_directories(backend
+        PUBLIC ${Boost_LIBRARY_DIRS}
+    )
+    set(BOOST_SERIAL_LIB Boost::serialization)
+endif()
+
 file(GLOB FLASH_ATTN_LIB "${Python_SITELIB}/flash_attn*.so")
+if(FLASH_ATTN_LIB)
+    add_definitions(-DENABLE_FLASH_MHA=1)
+    message("Check for the flash namespace")
+    # flash-attn has namespace after 0.7.4
+    execute_process(
+        COMMAND nm -D "${FLASH_ATTN_LIB}"
+        COMMAND grep _ZN5flash11run_mha_fwdERNS_16Flash_fwd_paramsEP11CUstream_stb
+        OUTPUT_VARIABLE FLASH_ATTN_SYMBOLS
+        RESULT_VARIABLE HAS_FLASH_NAMESPACE
+    )
+    if(HAS_FLASH_NAMESPACE EQUAL 0)
+        message("flash_attn has namespace.")
+        add_definitions(-DUSE_FLASH_NS=flash)
+    else()
+        message("flash_attn has not namespace.")
+    endif()
+else()
+    message(FATAL_ERROR "No flash_attn shared library (.so) found in ${Python_SITELIB}")
+endif()
 get_filename_component(FLASH_ATTN_SO ${FLASH_ATTN_LIB} NAME)
 message("FLASH_ATTN_SO: " ${FLASH_ATTN_SO})
 
@@ -99,7 +129,6 @@ target_include_directories(backend
     PUBLIC ${NCCL_INCLUDE_DIRS}
     PUBLIC ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
     PUBLIC ${Python_SITELIB}/torch/include
-    PUBLIC ${Boost_INCLUDE_DIRS}
 )
 
 target_link_directories(backend
@@ -110,12 +139,11 @@ target_link_directories(backend
     PUBLIC ${NCCL_LIBRARIES}
     PUBLIC ${Python_SITELIB}/torch/lib
     PUBLIC ${Python_SITELIB}
-    PUBLIC ${Boost_LIBRARY_DIRS}
 )
 
 target_link_libraries(backend
-    PUBLIC bmengine zmq Boost::serialization
-    "-Wl,-Bsymbolic -Wl,-Bsymbolic-functions"
+    PUBLIC bmengine
+    ${BOOST_SERIAL_LIB}
     ":${FLASH_ATTN_SO}"
     "deep_gemm"
     "flash_mla"
@@ -124,12 +152,9 @@ target_link_libraries(backend
 file(GLOB_RECURSE PYBIND_SOURCES "src/py_export/*.cpp")
 
 pybind11_add_module(C ${PYBIND_SOURCES})
-target_compile_definitions(C
-    PRIVATE VERSION_INFO=${EXAMPLE_VERSION_INFO})
 
 target_link_libraries(C PRIVATE
     bmengine
-    "-Wl,-Bsymbolic -Wl,-Bsymbolic-functions"
     "pthread"
     "backend"
 )
