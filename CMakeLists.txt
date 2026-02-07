@@ -82,6 +82,8 @@ add_library(backend STATIC ${BACKEND_SOURCES})
 set_property(TARGET backend PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 set(BOOST_SERIAL_LIB "")
+set(DEEP_GEMM_LIB "")
+set(FLASH_MLA_LIB "")
 if("$ENV{ENABLE_DIST_INFER}" STREQUAL "on")
     message(STATUS "ENABLE_DIST_INFER=on Need install libboost-serialization-dev")
     add_definitions(-DENABLE_DIST_INFER=1)
@@ -89,13 +91,17 @@ if("$ENV{ENABLE_DIST_INFER}" STREQUAL "on")
     if(NOT Boost_FOUND OR NOT TARGET Boost::serialization)
         message(FATAL_ERROR "Could not find required component Boost::serialization of the Boost library.")
     endif()
-    target_include_directories(backend
-        PUBLIC ${Boost_INCLUDE_DIRS}
-    )
-    target_link_directories(backend
-        PUBLIC ${Boost_LIBRARY_DIRS}
-    )
+    target_include_directories(backend PUBLIC ${Boost_INCLUDE_DIRS})
+    target_link_directories(backend PUBLIC ${Boost_LIBRARY_DIRS})
     set(BOOST_SERIAL_LIB Boost::serialization)
+endif()
+
+message("CMAKE_SYSTEM_PROCESSOR ${CMAKE_SYSTEM_PROCESSOR}")
+if(CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+    set(DEEP_GEMM_LIB "deep_gemm")
+    set(FLASH_MLA_LIB "flash_mla")
+    add_definitions(-DENABLE_DS_DEEP_GEMM=1)
+    add_definitions(-DENABLE_DS_FLASH_MLA=1)
 endif()
 
 file(GLOB FLASH_ATTN_LIB "${Python_SITELIB}/flash_attn*.so")
@@ -145,8 +151,8 @@ target_link_libraries(backend
     PUBLIC bmengine
     ${BOOST_SERIAL_LIB}
     ":${FLASH_ATTN_SO}"
-    "deep_gemm"
-    "flash_mla"
+    ${DEEP_GEMM_LIB}
+    ${FLASH_MLA_LIB}
 )
 
 file(GLOB_RECURSE PYBIND_SOURCES "src/py_export/*.cpp")
