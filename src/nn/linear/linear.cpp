@@ -1869,6 +1869,7 @@ public:
             BM_ASSERT_EQ(output->dtype(), dtype, "");
         }
         Tensor ret = output ? *output : ctx.tensor({m, n}, dtype, "", 8 * n);
+#ifdef ENABLE_DS_DEEP_GEMM
         int ret_code = deep_gemm_fp8_block_h20_group(
             q.data(),
             q.quant_scale->data(),
@@ -1886,6 +1887,9 @@ public:
         }
 
         return activate(ctx, ret);
+#else
+        throw std::runtime_error("Unsupported DEEP_GEMM");
+#endif
     }
 
     core::Tensor grouped_gemm(
@@ -1906,6 +1910,7 @@ public:
 
         ctx.recordEvent("gemm_fp8_block", ev_level);
         Tensor ret = ctx.tensor({m, n}, dtype);
+#ifdef ENABLE_DS_DEEP_GEMM
         int ret_code = deep_gemm_fp8_block_h20_group(
             q.data(),
             q.quant_scale->data(),
@@ -1923,6 +1928,9 @@ public:
         }
 
         return activate(ctx, ret);
+#else
+        throw std::runtime_error("Unsupported DEEP_GEMM");
+#endif
     }
 };
 

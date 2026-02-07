@@ -25,6 +25,7 @@ std::tuple<core::Tensor, core::Tensor> get_mla_metadata(
     const size_t num_heads_per_head_k,
     const size_t num_heads_k
 ) {
+#ifdef ENABLE_DS_FLASH_MLA
     // This should match the logic in the MLA kernel.
     static constexpr size_t block_size_m = 64;
     static constexpr size_t block_size_n = 64;
@@ -58,6 +59,9 @@ std::tuple<core::Tensor, core::Tensor> get_mla_metadata(
 //    std::cout << "get_mla_metadata: \n";
 
     return {tile_scheduler_metadata, num_splits};
+#else
+    throw std::runtime_error("Unsupported FlashMLA");
+#endif
 }
 
 std::tuple<core::Tensor, core::Tensor>
@@ -75,6 +79,7 @@ mha_fwd_kvcache_mla(
     const core::Tensor& num_splits,                // batch_size + 1
     core::Tensor out_org
 ) {
+#ifdef ENABLE_DS_FLASH_MLA
 //    core::Tensor vcache = !vcache_.empty() ? vcache_.value() : kcache;
     core::Tensor vcache = kcache;
 
@@ -200,6 +205,9 @@ mha_fwd_kvcache_mla(
 //        .reshape({batch_size, num_heads_ori, seqlen_q_ori});
 
     return {out_org, softmax_lse};
+#else
+    throw std::runtime_error("Unsupported FlashMLA");
+#endif
 }
 
 } // namespace ds
