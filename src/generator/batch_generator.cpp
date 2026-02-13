@@ -704,6 +704,18 @@ public:
 
     Tensor join_forward(Tensor* hidden);
 
+    void fill_last_hidden_states(const Tensor& e_hidden) {
+        BM_ASSERT_EQ(e_hidden.ndim(), 2L, "e_hidden is not 2-D");
+        BM_ASSERT_EQ(e_hidden.shape()[0], max_batch_active, "e_hidden batch mismatch");
+        BM_ASSERT_EQ(core::get_elem_size(e_hidden.dtype()), 2, "e_hidden is not half or bf16");
+        for (len_t b = 0; b < max_batch_active; ++b) {
+            if (tasks[b] && tasks[b]->output_hidden_states == -1) {
+                std::vector<short> v = e_hidden.index_dim0(b).to_vector<short>(ctx.current_cuda_stream());
+                tasks[b]->add_last_hidden_state(std::move(v));
+            }
+        }
+    }
+
     void pick_top_k(Tensor logits_all, Tensor hidden, Mat2DInt& h_placement, Matrix2D<float>& h_prob_prev);
 
     void beam_sample(len_t b, Tensor penalised_logits, Tensor prob_prev, vector<int>* top_ids, vector<float>* probs);
@@ -1259,6 +1271,7 @@ Tensor SearcherImplV1<int, int>::join_forward(Tensor* hidden) {
         } else {
             // cut out encoding
             Tensor hidden_search = hidden_g.slice_dim0(dyn_ctx->e_token.numel(), group_token.size(0));
+            if (i == 0) *hidden = hidden_search;
 
             Tensor logits = md->get_logits(ctx1, hidden_search, true);
 
@@ -1360,6 +1373,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
         /** -------------------------- Get Search Logits --------------------------- **/
         Tensor hidden;
         Tensor logits_all = join_forward(&hidden);
+        fill_last_hidden_states(hidden);
         ctx.check_numeric(logits_all);
         if (config.enable_prompt_caching) {
             save_prompt_cache();

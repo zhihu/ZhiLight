@@ -33,7 +33,6 @@ class __attribute__ ((visibility("hidden"))) PySearchTask {
 public:
     SearchTask task_;
     generator::SearchResults results;
-    bool bee_answer_multi_span;
 
     vector<int> output_tokens_nums_;
     long enqueue_ts;
@@ -54,7 +53,9 @@ public:
         int top_k,
         bool bee_answer_multi_span,
         int top_logprobs,
-        int stream) {
+        int stream,
+        int output_hidden_states
+        ) {
         SearchTask t = std::make_shared<SearchTask_>();
         t->input_tokens = py::cast<std::vector<int32_t>>(input_tokens_or_str);
         t->beam_size = beam_size;
@@ -70,10 +71,10 @@ public:
         t->top_k = top_k;
         t->top_logprobs = top_logprobs;
         t->stream = stream;
+        t->output_hidden_states = output_hidden_states;
         t->callback = [=](auto& r) {};
         shared_ptr<PySearchTask> py_task = std::make_shared<PySearchTask>();
         py_task->task_ = t;
-        py_task->bee_answer_multi_span = bee_answer_multi_span;
         return py_task;
     }
 
@@ -122,6 +123,20 @@ public:
     }
     vector<int> output_tokens_nums() {
         return output_tokens_nums_;
+    }
+
+    py::list convert_hidden_states(const vector<vector<vector<short>>>& hiddens) {
+        py::list token_list;
+        for (int i = 0; i < hiddens.size(); ++i) {
+            py::list layer_list;
+            for (int j = 0; j < hiddens[i].size(); ++j) {
+                // TODO: set seq_len in shape for encoding hidden_states
+                py::array_t<short> arr({1UL, 1UL, hiddens[i][j].size()}, hiddens[i][j].data());
+                layer_list.append(std::move(arr));
+            }
+            token_list.append(std::move(layer_list));
+        }
+        return token_list;
     }
 
     // LLaMA: tuple(tokens, score, time_ms)
@@ -302,7 +317,12 @@ py::object PySearchTask::get_result(float timeout) {
     } else {
         std::cerr << "results: No Results\n";
     }
-    py::tuple tuple = py::make_tuple(update_flag, out_tokens, score, final_results);
+    py::list hs;
+    if (this->task_->stream == 0) {
+        // Return hidden_states for non-stream result only.
+        hs = this->convert_hidden_states(task_->hidden_states);
+    }
+    py::tuple tuple = py::make_tuple(update_flag, out_tokens, score, final_results, hs);
     return tuple;
 }
 
