@@ -469,8 +469,20 @@ void Context::assign_or_copy(Tensor* dst, const Tensor* src) const {
         return;
     }
     BM_ASSERT_EQ(src->shape(), dst->shape(), "src and dst have different shape");
-    if (src->dtype() != DataType::kInt16)
-        BM_ASSERT_EQ(src->dtype(), dst->dtype(), "Assign to different dtype. src: " + src->name());
+    core::DataType src_dtype = (src->dtype() != DataType::kInt16) ? src->dtype() : DataType::kBFloat16;
+    static int auto_cast = get_int_env("LOAD_AUTO_CAST", 0);
+    if (auto_cast > 0 && src_dtype != dst->dtype()) {
+        if (auto_cast == 2) {
+            std::cout << "Auto cast " << src->name()
+                << " from " << std::to_string(src_dtype)
+                << " to " << std::to_string(dst->dtype()) << std::endl;
+        }
+        Tensor buf = this->tensor(src->shape(), src_dtype);
+        buf.from_buffer(src->data());
+        *dst = functions::typecast(*this, buf, dst->dtype());
+        return;
+    }
+    BM_ASSERT_EQ(src_dtype, dst->dtype(), "Assign to different dtype. src: " + src->name());
     // allocate memory
     if (dst->data() == nullptr) {
         init_parameter(dst->name(), dst);
@@ -713,12 +725,14 @@ void Context::load_parameter(
     if (print_param) {
         std::cout << "Load " << name << ", shape=" << weight->shape() << ", srcShape=" << param.shape() << endl;
     }
-    BM_ASSERT_EQ(weight->shape(), param.shape(), name +" shape mismatch");
+    BM_ASSERT_EQ(weight->shape(), param.shape(), name + " shape mismatch");
     if (!parallel || world_size() == 1 || layout == DistLayout::REPLICATED) {
         assign_or_copy(weight, &param);
         weight->set_name(name);
         return;
     }
+    core::DataType src_dtype = (param.dtype() != DataType::kInt16) ? param.dtype() : DataType::kBFloat16;
+    BM_ASSERT_EQ(src_dtype, weight->dtype(), name + " dtype mismatch");
     load_parameter_part(weight, name, state_dict, layout, rank(), world_size());
 }
 
