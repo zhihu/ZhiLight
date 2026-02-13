@@ -44,6 +44,7 @@ struct SearchTask_ {
     int top_k;
     int top_logprobs;
     int stream { 0 };  // 0: non stream; 1: single stream result; 2: multiple stream result
+    int output_hidden_states { 0 };  // 0: nothing; -1: last_hidden_states
     utils::TSQueue<generator::SearchResults> res_queue {INT_MAX};
     std::function<void(const generator::SearchResults& results)> callback;
     volatile bool canceled { false };
@@ -55,6 +56,9 @@ struct SearchTask_ {
     int position_delta { 0 };  // for multi-modal model
 
     std::map<int, float> logit_bias;
+
+    // results
+    vector<vector<vector<short>>> hidden_states;  // index 0: prompt? + decoded tokens; 1: layers
 
 #ifdef ENABLE_DIST_INFER
     friend class boost::serialization::access;
@@ -92,6 +96,10 @@ public:
         return input_tokens.size() + size_t(beam_size * max_length);
     }
     bool is_random() const { return top_p < 1. or top_k > 0; }
+    void add_last_hidden_state(std::vector<short>&& v) {
+        hidden_states.resize(hidden_states.size() + 1);  // new token
+        hidden_states.back().emplace_back(v);
+    }
 };
 
 #ifdef ENABLE_DIST_INFER

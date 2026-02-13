@@ -3,6 +3,7 @@ import gc
 import json
 import logging
 import math
+import numpy
 import os
 import sys
 import time
@@ -101,6 +102,7 @@ class GeneratorArg:
             top_logprobs: int = 0,
             logit_bias: dict[int, float] = None,
             max_input_length: int = sys.maxsize,  # to truncate input for benchmark and test
+            output_hidden_states: int = 0,
     ):
         self.beam_size = beam_size
         self.max_length = max_length
@@ -116,6 +118,7 @@ class GeneratorArg:
         self.top_logprobs = top_logprobs
         self.logit_bias = logit_bias
         self.max_input_length = max_input_length
+        self.output_hidden_states = output_hidden_states
 
         if self.is_random:
             self.seed = seed or 42
@@ -153,6 +156,7 @@ class GenerativeOutput:
         self.first_token_delay: float = first_token_delay / 1000
         self.top_logprobs = top_logprobs
         self.text = ''
+        self.keep_eos = False
 
     def decode(self, tokenizer, prefix_input=None):
         self.text = tokenizer.decode(self.token_ids)
@@ -180,10 +184,12 @@ class GenerativeOutput:
             print("\033[00m")
 
     def __repr__(self) -> str:
-        out_tps = len(self.token_ids) / max(0.001, self.time_elapsed - self.first_token_delay)
+        out_tps = (len(self.token_ids) - int(self.keep_eos)) / max(0.001, self.time_elapsed - self.first_token_delay)
+        tpot = 1. / max(0.001, out_tps)
         return (f"GenerativeOutput(text={repr(self.text)}, "
-                f"first_token_delay={self.first_token_delay}, "
-                f"out_tps={out_tps:.3f}, "
+                f"TTFT={self.first_token_delay}, "
+                f"TPOT={tpot:.3f}, "
+                f"OTPS={out_tps:.3f}, "
                 f"score={self.score:.6f}, "
                 f"output_tokens_num={len(self.token_ids)}, "
                 f"time_elapsed={self.time_elapsed})")
@@ -201,18 +207,21 @@ def _convert_output(t) -> GenerativeOutput:
 
 
 class RequestResult:
-    def __init__(self, prompt, outputs, input_tokens_num):
+    def __init__(self, prompt, outputs, input_tokens_num, hs=None):
         self.prompt = prompt
         self.outputs: List[GenerativeOutput] = outputs
         self.input_tokens_num = input_tokens_num
+        self.hidden_states = hs  # type: list[list[numpy.array]]
 
     @staticmethod
-    def from_cpp_result(prompt, c_outputs, input_tokens_num):
+    def from_cpp_result(prompt, c_outputs, input_tokens_num, keep_eos=False):
         """
          @:param t from c++ implementation: py_batch_generator.cpp convert_outputs_to_py()
         """
         assert isinstance(c_outputs, list), "c_outputs should be a list"
         outputs = [_convert_output(x) for x in c_outputs]
+        for o in outputs:
+            o.keep_eos = keep_eos
         return RequestResult(prompt, outputs, input_tokens_num)
 
     @staticmethod
@@ -221,11 +230,11 @@ class RequestResult:
          @:param t from c++ implementation: py_batch_generator.cpp get_result()
         """
         assert isinstance(t, tuple), "cpp stream result should be a tuple"
-        update_flag, _, _, final_results = t
+        update_flag, _, _, final_results, hs = t
         assert update_flag == StreamResultType.Final, "not a final result"
         assert isinstance(final_results, list), "final_results should be a list"
         outputs = [_convert_output(x) for x in final_results]
-        return RequestResult(prompt, outputs, input_tokens_num)
+        return RequestResult(prompt, outputs, input_tokens_num, hs)
 
     def __repr__(self) -> str:
         return f"RequestResult(outputs={self.outputs}, input_tokens_num={self.input_tokens_num})"
@@ -404,7 +413,8 @@ class DynamicBatchGenerator:
             arg.top_k,
             bool(arg.bee_answer_multi_span),
             arg.top_logprobs,
-            int(stream))
+            int(stream),
+            arg.output_hidden_states)
         if arg.logit_bias is not None:
             task.set_logit_bias(arg.logit_bias)
         return task
@@ -534,7 +544,7 @@ class DynamicBatchGenerator:
         batch_outputs: List[RequestResult] = [None] * len(tasks)
         for (i, task), outputs in zip(idx_tasks, sort_outs):
             batch_outputs[i] = RequestResult.from_cpp_result(
-                None, outputs, task.input_tokens_num())
+                None, outputs, task.input_tokens_num(), self.config.keep_eos)
         if start:
             self.stop()
         return batch_outputs
