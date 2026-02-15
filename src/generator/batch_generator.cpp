@@ -421,11 +421,10 @@ Tensor rag_tensor(ModelContext& ctx, const RagVector<T>& v2d) {
     return ctx.tensor_of<T>(flat);
 }
 
-template <typename TokenT, typename ResultT>
 class SearcherImplV1 {
-    typedef beam_utility::BeamBufferInfo<TokenT> BeamBufferInfo;
-    typedef beam_utility::BeamBufferManager<TokenT> BeamBufferManager;
-    typedef generator::BeamSearchResultManager<ResultT> BeamSearchResultManager;
+    typedef beam_utility::BeamBufferInfo<int> BeamBufferInfo;
+    typedef beam_utility::BeamBufferManager<int> BeamBufferManager;
+    typedef generator::BeamSearchResultManager<int> BeamSearchResultManager;
 
     len_t max_batch;
     len_t max_beam_size;
@@ -449,7 +448,7 @@ class SearcherImplV1 {
     len_t beam_size;
     len_t max_batch_active { 0 };
     len_t len_buf { 0 };
-    
+
     int debug_batch { -1 };
     int debug_batch_idx { -1 };
     int batch_idx { 0 };
@@ -697,10 +696,10 @@ public:
     }
 
     void fill_encode_input(vector<SearchTask>& new_tasks);
-    
+
     void fill_search_tokens(Mat2DInt& h_placement, Matrix2D<float>& h_prob_prev);
 
-    void save_prompt_cache() {}
+    void save_prompt_cache();
 
     Tensor join_forward(Tensor* hidden);
 
@@ -889,8 +888,7 @@ public:
     }
 };
 
-template <typename TokenT, typename ResultT>
-void SearcherImplV1<TokenT, ResultT>::resize_rag_buf() {
+void SearcherImplV1::resize_rag_buf() {
     total_len_buf = sum_len_buf();
     // std::cout << "max_batch_active=" << max_batch_active << ", total_len_buf=" << total_len_buf << ", max_buf_token_num=" << max_buf_token_num << "\n";
     // resize buf if necessary to hold next step tokens
@@ -932,8 +930,7 @@ void SearcherImplV1<TokenT, ResultT>::resize_rag_buf() {
     }
 }
 
-template <typename TokenT, typename ResultT>
-len_t SearcherImplV1<TokenT, ResultT>::calc_new_len_buf(len_t new_beam_size) {
+len_t SearcherImplV1::calc_new_len_buf(len_t new_beam_size) {
     len_t max_new_input_len = calc_max_input_len(new_tasks);
     len_t round_size = INCR_SIZE;
     len_t new_len_buf = round_up_len(max_new_input_len + 2, round_size);
@@ -954,8 +951,7 @@ len_t SearcherImplV1<TokenT, ResultT>::calc_new_len_buf(len_t new_beam_size) {
     return new_len_buf;
 }
 
-template <typename TokenT, typename ResultT>
-void SearcherImplV1<TokenT, ResultT>::resize(len_t new_beam_size, len_t new_len_buf) {
+void SearcherImplV1::resize(len_t new_beam_size, len_t new_len_buf) {
     BM_ASSERT(!config.rag_buffer, "");
     auto fn = [this](int i) {
         peer_ctx[i]->resize_transformer_buf(len_buf);
@@ -974,8 +970,7 @@ void SearcherImplV1<TokenT, ResultT>::resize(len_t new_beam_size, len_t new_len_
     }
 }
 
-template <>
-void SearcherImplV1<int, int>::fill_encode_input(vector<SearchTask>& new_tasks) {
+void SearcherImplV1::fill_encode_input(vector<SearchTask>& new_tasks) {
     bool chunking = in_chunking();
     if (chunking) {
         BM_ASSERT(new_tasks.empty(), "");
@@ -1115,8 +1110,7 @@ void SearcherImplV1<int, int>::fill_encode_input(vector<SearchTask>& new_tasks) 
     peer_run([&](int i) { set_fn(*peer_ctx[i]); }, true);  // prepare dyn_batch encode
 }
 
-template <>
-void SearcherImplV1<int, int>::save_prompt_cache() {
+void SearcherImplV1::save_prompt_cache() {
     for (size_t b = 0; b < max_batch_active; ++b) {
         auto fn = [=](int i) {
             auto rag_buf = peer_ctx[i]->rag_buffer().get();
@@ -1129,8 +1123,7 @@ void SearcherImplV1<int, int>::save_prompt_cache() {
     }
 }
 
-template <>
-void SearcherImplV1<int, int>::fill_search_tokens(
+void SearcherImplV1::fill_search_tokens(
     Matrix2D<int32_t>& h_placement, Matrix2D<float>& h_prob_prev) {
     len_t batch_active = get_batch_active();
     if (batch_active == 0) {
@@ -1228,8 +1221,7 @@ void SearcherImplV1<int, int>::fill_search_tokens(
 
 using functions::concat_tensor;
 
-template <>
-Tensor SearcherImplV1<int, int>::join_forward(Tensor* hidden) {
+Tensor SearcherImplV1::join_forward(Tensor* hidden) {
     long ts0 = logger::get_time_us();
 
     Tensor ret_logits;
@@ -1289,8 +1281,7 @@ Tensor SearcherImplV1<int, int>::join_forward(Tensor* hidden) {
     return ret_logits;
 }
 
-template <typename TokenT, typename ResultT>
-void SearcherImplV1<TokenT, ResultT>::batch_search() {
+void SearcherImplV1::batch_search() {
     int active_count = 0;
 
     while (true) {
@@ -1444,7 +1435,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
             }
             if (tasks[b]) {
                 active_count++;
-                max_batch_active = b + 1; 
+                max_batch_active = b + 1;
             } else if (config.rag_buffer) {
                 erase_task(b);
                 b--;
@@ -1466,8 +1457,7 @@ void SearcherImplV1<TokenT, ResultT>::batch_search() {
     }
 }
 
-template <>
-void SearcherImplV1<int, int>::apply_repetition_penalty(
+void SearcherImplV1::apply_repetition_penalty(
     Tensor& logits_all, // (batch, beam_size, vocab_size)
     Matrix2D<int32_t>& h_placement) {
     {
@@ -1537,8 +1527,7 @@ void SearcherImplV1<int, int>::apply_repetition_penalty(
     }
 }
 
-template <>
-void SearcherImplV1<int, int>::add_logit_bias(
+void SearcherImplV1::add_logit_bias(
     Tensor& logits_all // (batch, beam_size, vocab_size)
 ) {
     vector<int> batch_hypos;  // (batch, beam_size)
@@ -1560,16 +1549,14 @@ void SearcherImplV1<int, int>::add_logit_bias(
     }
 }
 
-template <typename TokenT, typename ResultT>
-Tensor SearcherImplV1<TokenT, ResultT>::log_softmax(const Tensor& logits_all, Matrix2D<float>& h_prob_prev) {
+Tensor SearcherImplV1::log_softmax(const Tensor& logits_all, Matrix2D<float>& h_prob_prev) {
     Tensor d_prob_prev = h_prob_prev.to_tensor(ctx);
     Tensor score_all = beam_utility::log_softmax_bias(ctx, logits_all, d_prob_prev);
     // TODO different temperature of every task
     return score_all;
 }
 
-template <>
-void SearcherImplV1<int, int>::update_stream(
+void SearcherImplV1::update_stream(
     len_t b, int sent_id, int word_id, int last_hypo_pos, float score) {
     len_t t = steps[b];
     stream_res[b].stream.score = score;
@@ -1593,8 +1580,7 @@ void SearcherImplV1<int, int>::update_stream(
     }
 }
 
-template <>
-void SearcherImplV1<int, int>::pick_top_k(
+void SearcherImplV1::pick_top_k(
     Tensor logits_all, Tensor hidden, Mat2DInt& h_placement, Matrix2D<float>& h_prob_prev) {
     size_t logits_dim = searcher->model_->vocab_size;
     this->apply_repetition_penalty(logits_all, h_placement);
@@ -1686,8 +1672,7 @@ void SearcherImplV1<int, int>::pick_top_k(
     }
 }
 
-template <typename TokenT, typename ResultT>
-void SearcherImplV1<TokenT, ResultT>::random_sample(
+void SearcherImplV1::random_sample(
     len_t b, Tensor penalised_logits, vector<int>* top_ids, vector<float>* fake_probs
 ) {
     SearchTask task = tasks[b];
@@ -1794,7 +1779,7 @@ void BatchGenerator::run() {
         ModelContext ctx = ModelContext::create(
             *engine_, *model_, config, par_models_.empty() ? -1 : 0, !par_models_.empty());
         if (llama_model()) {
-            SearcherImplV1<int, int>(ctx, config, this).batch_search();
+            SearcherImplV1(ctx, config, this).batch_search();
         } else if (!model_) {
             throw std::invalid_argument("No model");
         } else {
