@@ -475,6 +475,12 @@ class SearcherImplV1 {
     void resize_rag_buf();
     void resize(len_t new_beam_size, len_t new_len_buf);
 
+    len_t match_prefix_cache(const vector<int> &input_tokens, len_t b);
+
+    bool may_start_chunking(len_t b, len_t remaining, len_t cached_len);
+
+    len_t advance_chunk(len_t remaining);
+
     len_t sum_len_buf() {
         len_t sum = 0;
         if (config.rag_buffer) {
@@ -970,9 +976,62 @@ void SearcherImplV1::resize(len_t new_beam_size, len_t new_len_buf) {
     }
 }
 
+len_t SearcherImplV1::match_prefix_cache(const vector<int> &input_tokens, len_t b) {
+    len_t matched_len;
+    auto fn = [&](int i) {
+        auto rag_buf = peer_ctx[i]->rag_buffer().get();
+        // match and load to kv bufs
+        int len = prefix_cache[i]->get(
+            *peer_ctx[i], input_tokens, {rag_buf->buf_k_[b].get(), rag_buf->buf_v_[b].get()});
+        if (i == 0) matched_len = len;
+    };
+    peer_run(fn, true);
+    // task->cached_len_ = cached_len;
+    // std::cout << "cached_len: " << cached_len << endl;
+    return matched_len;
+}
+
+bool SearcherImplV1::may_start_chunking(len_t b, len_t remaining, len_t cached_len) {
+    if (enabled_chunk_prefill &&
+        !in_chunking() &&
+        remaining > chunk_size) {
+        chunking_b = b;  // MARK start chunk_prefill
+        chunked = cached_len;  // mark cached_len as already prefilled.
+        if (debug_level >= 2) {
+            std::cout << "Start chunked prefill b=" << b << " of " << (cached_len + remaining) << endl;
+        }
+        return true;
+    }
+    return false;
+}
+
+len_t SearcherImplV1::advance_chunk(len_t remaining) {
+    len_t beam_size1 = calc_max_beam_size(tasks, 0);
+    BM_ASSERT(beam_size1 > 0, "");
+    BM_ASSERT(max_batch_active > 0, "");
+    // We adjust size here, so the joined length with align to chunk_size for better GEMM performance.
+    len_t chunk_size_adj = chunk_size - chunking_b * beam_size1;
+    if (remaining <= chunk_size_adj) {
+        if (debug_level >= 2) {
+            std::cout << "Done chunking, len=" << (chunked + remaining) << endl;
+        }
+        max_batch_active = chunking_b + 1;
+        chunking_b = -1; // MARK end of chunk_prefill !!!
+        chunked = 0;
+        return remaining;
+    } else {
+        if (debug_level >= 2) {
+            std::cout << "Prefill size=" << chunk_size_adj << " chunk=["
+               << chunked << ", " << (chunked + chunk_size_adj) << "] of " << (chunked + remaining) << endl;
+        }
+        chunked += chunk_size_adj;
+        return chunk_size_adj;
+    }
+}
+
 void SearcherImplV1::fill_encode_input(vector<SearchTask>& new_tasks) {
     bool chunking = in_chunking();
-    if (chunking) {
+    if (in_chunking()) {
         BM_ASSERT(new_tasks.empty(), "");
         // BM_ASSERT_EQ(chunking_b, max_batch_active, "");
         // Fake chunking task as new task
@@ -985,7 +1044,6 @@ void SearcherImplV1::fill_encode_input(vector<SearchTask>& new_tasks) {
     vector<int> buf_lens(new_tasks.size());
     // fill matrices of input tokens
     RagVector<int32_t> h_token;
-    RagVector<int32_t> h_batch;
     RagVector<int32_t> h_placement;
     RagVector<int32_t> h_position;
     RagVector<int8_t> h_mask;
@@ -994,8 +1052,8 @@ void SearcherImplV1::fill_encode_input(vector<SearchTask>& new_tasks) {
         auto& task = new_tasks[i];
         auto& tokens = task->input_tokens;
         len_t b;
-        if (chunking) {
-            b = chunking_b;
+        if (in_chunking()) {
+            b = chunking_b;  // continue the faked chunking task
         } else {
             b = assign_free_slot(task);
             BM_ASSERT(b != len_t(-1), "No free slot");
@@ -1004,77 +1062,48 @@ void SearcherImplV1::fill_encode_input(vector<SearchTask>& new_tasks) {
         }
         v_batch[i] = b;
 
-        len_t cached_len = chunked;
+        // Figure out three lens: cached_len, remaining_len, encode_len
+        len_t cached_len = enabled_chunk_prefill ? chunked : 0;
         if (config.enable_prompt_caching && tokens.size() > 10 && chunked == 0) {
-            auto fn = [=, &cached_len](int i) {
-                auto rag_buf = peer_ctx[i]->rag_buffer().get();
-                int len = prefix_cache[i]->get(
-                    *peer_ctx[i], task->input_tokens, {rag_buf->buf_k_[b].get(), rag_buf->buf_v_[b].get()});
-                if (i == 0) cached_len = len;
-            };
-            peer_run(fn, true); // prefix_cache[i]->get
-            // task->cached_len_ = cached_len;
-            // std::cout << "cached_len: " << cached_len << endl;
+            cached_len = match_prefix_cache(task->input_tokens, b);
         }
         len_t token_num = tokens.size() - 1;  // Reserve last token for search
         BM_ASSERT_LT(cached_len, token_num, "");
-        len_t encode_len = token_num - cached_len;
+        len_t remaining_len = token_num - cached_len;
 
-        bool first_chunk = false;
-        if (!chunking && enabled_chunk_prefill && encode_len > chunk_size) {
-            first_chunk = true;
-            chunking = true;
-            chunking_b = b; // start chunk_prefill
-            chunked = cached_len;
-            // std::cout << "Start chunked prefill b=" << b << endl;
-        }
+        bool first_chunk = may_start_chunking(b, remaining_len, cached_len);
 
-        if (!chunking || first_chunk) {
+        if (!in_chunking() || first_chunk) {
             // std::cout << "Init bm[" << b << "] len=" << token_num << endl;
             bm[b].init(task->input_tokens, int(token_num));
         }
-        if (chunking) {
-            len_t beam_size1 = calc_max_beam_size(tasks, 0);
-            BM_ASSERT(beam_size1 > 0, "");
-            BM_ASSERT(max_batch_active > 0, "");
-            len_t chunk_size_adj = chunk_size - chunking_b * beam_size1;
-            if (encode_len <= chunk_size_adj) {
-                // std::cout << "Done chunking b=" << b << ", len=" << (chunked + encode_len) << endl;
-                max_batch_active = chunking_b + 1;
-                chunking_b = -1; // end chunk_prefill
-                chunked = 0;
-                chunking = false;
-            } else {
-                // std::cout << "Prefill size=" << chunk_size_adj << " chunk=["
-                //    << chunked << ", " << (chunked + chunk_size_adj) << "] of " << tokens.size() << endl;
-                encode_len = chunk_size_adj;
-                chunked += chunk_size_adj;
-            }
+        len_t encode_len = remaining_len;
+        if (in_chunking()) {
+            encode_len = advance_chunk(remaining_len);
         }
 
-        input_lens[i] = encode_len;
-        full_input_lens[i] = token_num;
-        if (chunking)
-            full_input_lens[i] = chunked;
+        input_lens[i] = static_cast<int>(encode_len);
+        full_input_lens[i] = static_cast<int>(cached_len + encode_len);
+        // Done figure out three lens
+
         len_t len1 = round_up_len(encode_len, INCR_SIZE);
-        buf_lens[i] = (len1 <= len_buf / 2 || (len1 + 256) <= len_buf) ? len1 : len_buf;
-        buf_lens[i] = config.rag_buffer ? bm[b].len_buf : buf_lens[i];
+        len_t buf_len_old = (len1 <= len_buf / 2 || (len1 + 256) <= len_buf) ? len1 : len_buf;
+        buf_lens[i] = config.rag_buffer ? bm[b].len_buf : static_cast<int>(buf_len_old);
 
         h_token.emplace_back(encode_len);
-        h_batch.emplace_back(encode_len);
         h_placement.emplace_back(encode_len);
         h_position.emplace_back(encode_len);
 
         for (len_t pos = 0; pos < encode_len; pos++) {
             h_token[i][pos] = tokens[cached_len + pos];
-            h_batch[i][pos] = b;
-            h_placement[i][pos] = cached_len + pos;
-            h_position[i][pos] = cached_len + pos;
+            h_placement[i][pos] = static_cast<int>(cached_len + pos);
+            h_position[i][pos] = static_cast<int>(cached_len + pos);
         }
+        // TODO: mask maybe is wrong for chunking, is useless for FlashAttention.
         h_mask.emplace_back(encode_len * buf_lens[i]);
         bm[b].mask_input(&h_mask[i][0], encode_len, buf_lens[i], cached_len);
         // set last token to search
-        if (!chunking)
+        if (!in_chunking())
             next_tokens[b].emplace_back(tokens[token_num], bm[b].last_input_buf_pos, 0.0, 1);
     }
 
@@ -1103,7 +1132,7 @@ void SearcherImplV1::fill_encode_input(vector<SearchTask>& new_tasks) {
         }
 
         ctx.dyn_batch()->set_encode(e_token, Tensor(), e_placement, e_position, e_mask);
-        ctx.dyn_batch()->set_encode_batch(v_batch, rag_tensor(ctx, h_batch));
+        ctx.dyn_batch()->set_encode_batch(v_batch, Tensor());
         ctx.dyn_batch()->set_encode_len(input_lens, full_input_lens, ctx.tensor_of(input_lens));
         ctx.dyn_batch()->ev_len_buf = buf_lens;
     };
