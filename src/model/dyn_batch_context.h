@@ -228,7 +228,7 @@ struct DynBatchContext {
         const vector<int>& v_batch,
         const Tensor& batch) {
         this->ev_batch = v_batch;
-        this->e_batch = batch;
+        // this->e_batch = batch;  // useless
     }
 
     void set_encode_len(
