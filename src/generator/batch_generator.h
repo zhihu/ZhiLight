@@ -127,10 +127,10 @@ public:
     size_t size();
 };
 
-template <class, class> class SearcherImplV1;
+class SearcherImplV1;
 
 class BatchGenerator {
-    friend class SearcherImplV1<int, int>;
+    friend class SearcherImplV1;
 
     DynBatchConfig config;
     ModelBase* model_;
