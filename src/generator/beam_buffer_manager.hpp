@@ -45,10 +45,6 @@ public:
     int last_input_buf_pos { -1 };
     int mask_stride { -1 };
 
-    // flying hypo<->pos mapping, tracked postions are valid till next input.
-    // picked hypo positions are refcount increased, remains are garbage collected.
-    std::vector<int> head_placement_;
-
     explicit BeamBufferManager(int len_buf) : buf_local(len_buf), len_buf(len_buf) { }
 
     BeamBufferManager(const BeamBufferManager& other) = default;
@@ -63,7 +59,7 @@ public:
         return *this;
     }
 
-    void init(const std::vector<TokenT>& input, int len_input) {
+    void init(const std::vector<TokenT>& input, int len_input, int start_pos=0) {
         // fill inputs
         for (int i = 0; i < len_input; i++) {
             buf_local[i] = BeamBufferInfo<TokenT>(input[i], i - 1, 0.0, 1);
@@ -73,7 +69,6 @@ public:
         for (int i = 0; i < len_buf - len_input; i++) {
             unused_buffer_pos.push_back(len_buf - i - 1);
         }
-        head_placement_.emplace_back(last_input_buf_pos);
     }
 
     void reset(int new_len_buf) {
@@ -84,23 +79,8 @@ public:
         last_input_buf_pos = -1;
     }
 
-    void trim(int len_input) {
-        last_input_buf_pos = std::min(len_input - 1, last_input_buf_pos);
-	    int allocated = buf_local.size() - unused_buffer_pos.size();
-        // unused pos: len_input, len_input+1 ... len_buf-1 in reverse order
-        for (int i = 0; i < allocated - len_input; i++) {
-	    int pos = allocated - i - 1;
-            buf_local[pos].prev = -1;
-            buf_local[pos].ref_count = 0;
-            unused_buffer_pos.push_back(pos);
-        }
-        head_placement_.clear();
-    }
-
-    int get_hypo_pos(int hypo_id) const { return head_placement_[hypo_id]; };
     void increase_buf_ref(int hypo_end_pos) { buf_local[hypo_end_pos].ref_count++; }
     void decrease_buf_ref(int hypo_end_pos) { buf_local[hypo_end_pos].ref_count--; }
-    void increase_hypo_ref(int hypo_id) { increase_buf_ref(get_hypo_pos(hypo_id)); }
 
     bool full() const { return unused_buffer_pos.empty(); };
 
@@ -170,11 +150,6 @@ public:
         }
     }
 
-    void release_last_buffer() {
-	release_buffer(head_placement_.data(), head_placement_.size());
-	head_placement_.clear();
-    }
-
     void release_buffer(const std::vector<int>& hypotheses_last_pos) {
         for (int pos : hypotheses_last_pos) {
             release_buffer(pos);
@@ -195,23 +170,6 @@ public:
             // 转成正序
             std::reverse(tokens->begin(), tokens->end());
         }
-    }
-
-    void get_hypothesis_tokens_by_hypo_id(
-        int hypo_id, std::vector<TokenT>* tokens, bool reverse = false) const {
-	    get_hypothesis_tokens(get_hypo_pos(hypo_id), tokens, reverse);
-    }
-
-    std::vector<TokenT> get_output_sequence(
-        TokenT word_id, TokenT eos_id, int hypo_id) {
-        std::vector<int> tmp_res;
-        if (word_id != eos_id) {
-            tmp_res.emplace_back(word_id);
-        }
-        get_hypothesis_tokens(
-            get_hypo_pos(hypo_id), &tmp_res, true);
-        std::reverse(tmp_res.begin(), tmp_res.end());
-        return std::move(tmp_res);
     }
 
     std::vector<TokenT> get_hypo_tokens(TokenT t, bool eos, int hypo_last_pos) const {
@@ -259,7 +217,6 @@ public:
     void mask_hypotheses(const int* hypotheses_last_pos, size_t hyp_num, int8_t* mask) {
         for (size_t i = 0; i < hyp_num; i++) {
             mask_hypothesis(mask, i, hypotheses_last_pos[i]);
-	    head_placement_.emplace_back(hypotheses_last_pos[i]);
         }
     }
 
