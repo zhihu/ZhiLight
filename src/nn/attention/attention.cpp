@@ -538,7 +538,7 @@ Tensor Attention::impl::NormalImpl::attn_encode_group(
                 .view({ 1, full_input_len, num_kv_heads, dim_head });
             auto fa_out = v_t.view(h_q.size());
             // TODO: do varlen batch prefill, interface is ready, but need organize input/output/kv_cache
-            flash_decoding(ctx, h_q, key_cache, val_cache, &fa_out);
+            flash_decoding.mha_fwd(ctx, h_q, key_cache, val_cache, &fa_out);
             offset += input_len;
             continue;
         }

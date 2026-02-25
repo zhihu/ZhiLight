@@ -51,22 +51,22 @@ public:
         Tensor out,               // (batch, len_q, num_heads, dim_head)
         float scale_softmax = 0);
 
-private:
-
     Tensor mha_fwd(
         const Context &ctx,
         Tensor &q,               // batch_size x seqlen_q x num_heads x round_multiple(head_size, 8)
         const Tensor &k,         // batch_size x seqlen_k x num_heads_k x round_multiple(head_size, 8)
         const Tensor &v,         // batch_size x seqlen_k x num_heads_k x round_multiple(head_size, 8)
         Tensor *out_,            // batch_size x seqlen_q x num_heads x round_multiple(head_size, 8)
-        Tensor *alibi_slopes,    // num_heads or batch_size x num_heads
-        const float p_dropout,
-        const float softmax_scale,
-        bool is_causal,
-        int window_size_left,
-        int window_size_right,
-        const float softcap,
-        const bool return_softmax);
+        Tensor *alibi_slopes = nullptr,  // num_heads or batch_size x num_heads
+        const float p_dropout = 0.f,
+        const float softmax_scale = 0.f,
+        bool is_causal = true,
+        int window_size_left = -1,
+        int window_size_right = -1,
+        const float softcap = 0.f,
+        const bool return_softmax = false);
+
+private:
 
     Tensor mha_varlen_fwd(
         const Context &ctx,
