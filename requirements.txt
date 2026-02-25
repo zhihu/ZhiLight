@@ -1,9 +1,9 @@
-torch==2.4.1
+torch>=2.4.1
 numpy
 transformers>=4.46.2
 fastapi>=0.115.5
-psutil==6.1.0
-prometheus_client==0.21.0
+psutil>=6.1.0
+prometheus_client>=0.21.0
 uvicorn>=0.32.0
 pybind11==2.13.6
-flash-attn==2.7.0.post2
+flash-attn>=2.7.0.post2
