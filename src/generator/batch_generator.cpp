@@ -65,6 +65,13 @@ len_t round_up_len(len_t len, len_t d = INCR_SIZE) {
     return (len + d - 1) / d * d;
 }
 
+void print_mask(vector<int8_t>& mask) {
+    for (auto i : mask) {
+        std::cout << int(i);
+    }
+    std::cout << std::endl;
+}
+
 void SearchTask_::finish(generator::SearchResults&& results) {
     BM_ASSERT(!results.results.empty(), "finish without result!");
     callback(results);
@@ -506,7 +513,7 @@ public:
           topk(max_batch),
           result_mgr(max_batch, BeamSearchResultManager(0)),
           stream_res(max_batch),
-          bm(max_batch, BeamBufferManager(config.chunk_size)),
+          bm(max_batch, BeamBufferManager(0)),
           steps(max_batch),
           hypotheses(max_batch),
           next_tokens(max_batch),
@@ -709,13 +716,17 @@ public:
 
     Tensor join_forward(Tensor* hidden);
 
+    void end_session();
+
     void fill_last_hidden_states(const Tensor& e_hidden) {
         BM_ASSERT_EQ(e_hidden.ndim(), 2L, "e_hidden is not 2-D");
         BM_ASSERT_EQ(e_hidden.shape()[0], max_batch_active, "e_hidden batch mismatch");
         BM_ASSERT_EQ(core::get_elem_size(e_hidden.dtype()), 2, "e_hidden is not half or bf16");
+        Tensor e_hidden_half = functions::typecast(ctx, e_hidden, DataType::kHalf);
+        BM_CUDART_ASSERT(cudaStreamSynchronize(ctx.current_stream()->ptr));
         for (len_t b = 0; b < max_batch_active; ++b) {
             if (tasks[b] && tasks[b]->output_hidden_states == -1) {
-                std::vector<short> v = e_hidden.index_dim0(b).to_vector<short>(ctx.current_cuda_stream());
+                std::vector<short> v = e_hidden_half.index_dim0(b).to_vector<short>(ctx.current_cuda_stream());
                 tasks[b]->add_last_hidden_state(std::move(v));
             }
         }
@@ -798,13 +809,26 @@ public:
             bm[b].reset(len_buf); // global len_buf
         } else {
             // individual len_buf
-            len_t new_len_buf = round_up_len(task->input_length() + 2, INCR_SIZE);
-            bm[b].reset(new_len_buf);
+            len_t filled_len = 0;
+            if (task->in_session()) {
+                BM_ASSERT_EQ(task->sess_chunk_pos, bm[b].total_used_pos(), "Wrong session chunk position");
+                filled_len = task->sess_chunk_pos;
+            }
+            len_t new_len_buf = round_up_len(filled_len + task->input_length() + 2, INCR_SIZE);
+            if (task->session_continue) {
+                if (new_len_buf > bm[b].len_buf) {
+                    // std::cout << "extend_buffer from " << bm[b].len_buf << " to " << new_len_buf << std::endl;
+                    bm[b].extend_buffer(new_len_buf - bm[b].len_buf);
+                }
+            } else {
+                bm[b].reset(new_len_buf);
+            }
             if (pre_alloc) {
-                len_t full_len_buf = round_up_len(task->full_length() + 2, INCR_SIZE);
+                len_t full_len_buf = round_up_len(filled_len + task->full_length() + 2, INCR_SIZE);
                 resize_task_buf(b, full_len_buf, true);
             } else {
-                resize_task_buf(b, new_len_buf); // alloc new
+                if (!task->session_continue || ctx.rag_buffer()->get_buf_len(b) < new_len_buf)
+                    resize_task_buf(b, new_len_buf); // alloc new
             }
         }
 
@@ -1067,6 +1091,11 @@ void SearcherImplV1::fill_encode_input(vector<SearchTask>& new_tasks) {
         if (config.enable_prompt_caching && tokens.size() > 10 && chunked == 0) {
             cached_len = match_prefix_cache(task->input_tokens, b);
         }
+        if (task->session_continue) {
+            if (debug_level > 1)
+                std::cout << "Session continue from " << task->sess_chunk_pos << " tokens: " << task->input_tokens << std::endl;
+            // cached_len = task->sess_chunk_pos;
+        }
         len_t token_num = tokens.size() - 1;  // Reserve last token for search
         BM_ASSERT_LT(cached_len, token_num, "");
         len_t remaining_len = token_num - cached_len;
@@ -1075,7 +1104,11 @@ void SearcherImplV1::fill_encode_input(vector<SearchTask>& new_tasks) {
 
         if (!in_chunking() || first_chunk) {
             // std::cout << "Init bm[" << b << "] len=" << token_num << endl;
-            bm[b].init(task->input_tokens, int(token_num));
+            if (task->session_continue) {
+                bm[b].init_chunk(task->input_tokens, int(token_num), task->sess_chunk_pos);
+            } else {
+                bm[b].init(task->input_tokens, int(token_num));
+            }
         }
         len_t encode_len = remaining_len;
         if (in_chunking()) {
@@ -1083,7 +1116,7 @@ void SearcherImplV1::fill_encode_input(vector<SearchTask>& new_tasks) {
         }
 
         input_lens[i] = static_cast<int>(encode_len);
-        full_input_lens[i] = static_cast<int>(cached_len + encode_len);
+        full_input_lens[i] = static_cast<int>(task->sess_chunk_pos + cached_len + encode_len);
         // Done figure out three lens
 
         len_t len1 = round_up_len(encode_len, INCR_SIZE);
@@ -1094,10 +1127,11 @@ void SearcherImplV1::fill_encode_input(vector<SearchTask>& new_tasks) {
         h_placement.emplace_back(encode_len);
         h_position.emplace_back(encode_len);
 
+        len_t pos_offset = task->sess_chunk_pos + cached_len;
         for (len_t pos = 0; pos < encode_len; pos++) {
             h_token[i][pos] = tokens[cached_len + pos];
-            h_placement[i][pos] = static_cast<int>(cached_len + pos);
-            h_position[i][pos] = static_cast<int>(cached_len + pos);
+            h_placement[i][pos] = static_cast<int>(pos_offset + pos);
+            h_position[i][pos] = static_cast<int>(pos_offset + pos);
         }
         // TODO: mask maybe is wrong for chunking, is useless for FlashAttention.
         h_mask.emplace_back(encode_len * buf_lens[i]);
@@ -1189,6 +1223,8 @@ void SearcherImplV1::fill_search_tokens(
             max_hyp_num = hyp_num;
         }
         int position = tasks[b] ? int(tasks[b]->input_tokens.size()) + steps[b] : 0;
+        position += tasks[b]->sess_chunk_pos;
+
         bool is_random = tasks[b] && tasks[b]->is_random();
         // int cached_len = tasks[b] ? int(tasks[b]->cached_len_) : 0;
         for (int i = 0; i < hyp_num; i++) {
@@ -1230,6 +1266,7 @@ void SearcherImplV1::fill_search_tokens(
         Tensor d_placement = h_placement.to_tensor(ctx);
         Tensor d_position = h_position.to_tensor(ctx).view({h_token.size()});
         Tensor d_mask = config.rag_buffer ? rag_tensor(ctx, rag_mask) : h_mask.to_tensor(ctx);
+        // print_mask(rag_mask[0]);
 
         ctx.dyn_batch()->set_search(d_token, Tensor(), d_placement, d_position, d_mask);
         ctx.dyn_batch()->sv_position = std::vector<int>(
@@ -1283,7 +1320,7 @@ Tensor SearcherImplV1::join_forward(Tensor* hidden) {
             ctx1.dyn_batch()->s_mask,
             ctx1.dyn_batch()->s_placement,
             input_embeddings,
-            false);
+            true);
         BM_ASSERT_EQ(hidden_g.size(0), group_token.size(0), "encode result dim mismatch");
 
         if (dyn_ctx->e_token.numel() == group_token.size(0)) {
@@ -1292,9 +1329,10 @@ Tensor SearcherImplV1::join_forward(Tensor* hidden) {
         } else {
             // cut out encoding
             Tensor hidden_search = hidden_g.slice_dim0(dyn_ctx->e_token.numel(), group_token.size(0));
+            // std::cout << "hidden_search: " << hidden_search << std::endl;
             if (i == 0) *hidden = hidden_search;
 
-            Tensor logits = md->get_logits(ctx1, hidden_search, true);
+            Tensor logits = md->get_logits(ctx1, hidden_search, false);
 
             // assign result in rank 0
             if (i == 0) ret_logits = logits;
@@ -1308,6 +1346,14 @@ Tensor SearcherImplV1::join_forward(Tensor* hidden) {
     peer_run(peer_fn, true); // join_forward
 
     return ret_logits;
+}
+
+void SearcherImplV1::end_session() {
+    if (debug_level > 1)
+        std::cout << "Close session: " << new_tasks[0]->session_id << std::endl;
+    // Free resource at b=0
+    erase_task(0);
+    pad_task();
 }
 
 void SearcherImplV1::batch_search() {
@@ -1367,18 +1413,35 @@ void SearcherImplV1::batch_search() {
             std::cout << "new_tasks=" << new_tasks.size()
                 << ", active_count=" << active_count << endl;
         }
+        if (!new_tasks.empty() && new_tasks[0]->in_session()) {
+            BM_ASSERT(!tasks[0], "Session support only batch=1");
+            BM_ASSERT(config.max_batch == 1, "Session support only batch=1");
+            if (new_tasks[0]->session_end) {
+                BM_ASSERT_EQ(active_count, 0, "Session support only batch=1");
+                end_session();
+                continue;
+            }
+        }
         bool feed_input_embedding = !new_tasks.empty() && !new_tasks[0]->input_embeddings.empty();
         if (feed_input_embedding && tasks[0]) {
             BM_ASSERT(searcher->engine_->nnodes() == 1, "feed_input_embedding only support single node, now");
             int b = assign_free_slot(tasks[0]);
             if (debug_level) std::cout << "Move task 0 to " << b << endl;
-            move_task(b, 0); // move tasks[0] to b
+            if (b != 0)
+                move_task(b, 0); // move tasks[0] to b
             BM_ASSERT(!tasks[0], "Feed input_embeddings need put task at index=0");
         }
 
         /** -------------------------- Fill Encode Input -------------------------- **/
         if (!new_tasks.empty() || in_chunking()) {
-            fill_encode_input(new_tasks); // update max_batch_active in init_slot()
+            if (new_tasks[0]->input_length() > 1) {
+                fill_encode_input(new_tasks); // update max_batch_active in init_slot()
+            } else {
+                BM_ASSERT(new_tasks[0]->session_continue, "input_length is 1 in non-session mode");
+                init_slot(0, new_tasks[0]);
+                bm[0].last_input_buf_pos = new_tasks[0]->sess_chunk_pos - 1;
+                next_tokens[0].emplace_back(new_tasks[0]->input_tokens[0], bm[0].last_input_buf_pos, 0.0, 1);
+            }
             new_tasks.clear();
         }
         max_beam_size = calc_max_beam_size(tasks, 1);
@@ -1435,6 +1498,7 @@ void SearcherImplV1::batch_search() {
         len_t max_batch_active1 = max_batch_active;
         max_batch_active = 0;
         for (len_t b = 0; b < max_batch_active1; ++b) {
+            auto in_session = tasks[b]->in_session();
             if (tasks[b] && next_tokens[b].empty()) {
                 if (result_mgr[b].get_current_results() == 0) {
                     std::cerr << "No Result and no next_tokens!\n";
@@ -1466,7 +1530,8 @@ void SearcherImplV1::batch_search() {
                 active_count++;
                 max_batch_active = b + 1;
             } else if (config.rag_buffer) {
-                erase_task(b);
+                if (!in_session)
+                    erase_task(b);
                 b--;
                 max_batch_active1--;
             }
@@ -1752,7 +1817,7 @@ BatchGenerator::~BatchGenerator() {
 }
 
 bool BatchGenerator::submit(SearchTask task, bool wait, bool notify)  {
-    if (task->input_tokens.size() <= 1) {
+    if (task->input_tokens.size() < 1) {
         throw std::invalid_argument("Empty input");
     }
     int max_input_token = config.max_total_token - task->beam_size;
@@ -1770,6 +1835,15 @@ bool BatchGenerator::submit(SearchTask task, bool wait, bool notify)  {
         task->seed = rand();
     }
     return queue_.push(task, wait, notify);
+}
+
+void BatchGenerator::close_session(const std::string& session_id) {
+    SearchTask t = std::make_shared<SearchTask_>();
+    t->input_tokens = {1, 2, 3};
+    t->beam_size = 1;
+    t->session_id = session_id;
+    t->session_end = true;
+    submit(t, true);
 }
 
 void BatchGenerator::start() {

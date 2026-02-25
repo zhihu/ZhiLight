@@ -57,6 +57,12 @@ struct SearchTask_ {
 
     std::map<int, float> logit_bias;
 
+    // session info
+    std::string session_id;
+    bool session_continue { false };
+    bool session_end { false };
+    int sess_chunk_pos { 0 };
+
     // results
     vector<vector<vector<short>>> hidden_states;  // index 0: prompt? + decoded tokens; 1: layers
 
@@ -100,6 +106,7 @@ public:
         hidden_states.resize(hidden_states.size() + 1);  // new token
         hidden_states.back().emplace_back(v);
     }
+    bool in_session() const { return !session_id.empty(); }
 };
 
 #ifdef ENABLE_DIST_INFER
@@ -162,6 +169,7 @@ public:
     }
 
     bool submit(SearchTask task, bool wait, bool notify = true);
+    void close_session(const std::string& session_id);
     void wait_all_done();
     int queue_size() { return queue_.size(); }
     int active_size() { return active_size_; }
