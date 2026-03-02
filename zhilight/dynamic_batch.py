@@ -126,6 +126,21 @@ class GeneratorArg:
             logging.warning("BeamSearch ignore seed")
             self.seed = 0
 
+        # TODO: use a dict for session info?
+        self.session_id = None
+        self.session_continue = False
+        self.sess_chunk_pos = 0
+
+    def set_session_info(
+        self,
+        session_id: str,
+        session_continue: bool = False,
+        sess_chunk_pos: int = 0,
+    ):
+        self.session_id = session_id
+        self.session_continue = session_continue
+        self.sess_chunk_pos = sess_chunk_pos
+
     def copy(self, **kwargs):
         obj = type(self).__new__(self.__class__)
         obj.__dict__.update(self.__dict__)
@@ -212,6 +227,13 @@ class RequestResult:
         self.outputs: List[GenerativeOutput] = outputs
         self.input_tokens_num = input_tokens_num
         self.hidden_states = hs  # type: list[list[numpy.array]]
+
+    def torch_hidden_states(self, dtype):
+        import torch
+        if self.hidden_states is None:
+            return None
+        # fill_last_hidden_states() fill with half
+        return [[torch.from_numpy(x).cuda().view(torch.half).to(dtype) for x in hs] for hs in self.hidden_states]
 
     @staticmethod
     def from_cpp_result(prompt, c_outputs, input_tokens_num, keep_eos=False):
@@ -417,6 +439,8 @@ class DynamicBatchGenerator:
             arg.output_hidden_states)
         if arg.logit_bias is not None:
             task.set_logit_bias(arg.logit_bias)
+        if arg.session_id is not None:
+            task.set_session_info(arg.session_id, arg.session_continue, arg.sess_chunk_pos)
         return task
 
     def check_queue_busy(self):
@@ -598,6 +622,7 @@ class DynamicBatchGenerator:
         self._c_generator.stop()
         if self._thread is not None:
             self._thread.join()
+            self._thread = None
 
     def __enter__(self):
         self.start()
@@ -605,3 +630,7 @@ class DynamicBatchGenerator:
 
     def __exit__(self, *args):
         self.stop()
+
+    def __del__(self):
+        self.stop()
+

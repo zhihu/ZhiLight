@@ -90,10 +90,19 @@ public:
         task_->position_delta = delta;
     }
     void set_input_embeddings(py::array data) {
-        task_->input_embeddings = bind::numpy_to_tensor("input_embeddings", data, true);
+        auto t = bind::numpy_to_tensor("input_embeddings", data, true);
+        BM_ASSERT(t.dtype() == core::DataType::kFloat || t.dtype() == core::DataType::kHalf, "Invalid input_embeds dtype")
+        task_->input_embeddings = t;
     }
     void set_logit_bias(std::map<int, float> &bias) {
         task_->logit_bias = bias;
+    }
+
+    void set_session_info(const std::string& session_id, bool session_continue, int sess_chunk_pos) {
+        // std::cout << "Session:" << session_id << ", continue=" << session_continue << ", chunkPos=" << sess_chunk_pos << std::endl;
+        task_->session_id = session_id;
+        task_->session_continue = session_continue;
+        task_->sess_chunk_pos = sess_chunk_pos;
     }
 
     generator::SearchResults pop_res(float timeout) {
@@ -271,6 +280,10 @@ public:
         task.enqueue_ts = get_time_us();
         return true;
     }
+
+    void close_session(const std::string& session_id) {
+        searcher_->close_session(session_id);
+    }
 };
 
 // for Stream API
@@ -359,6 +372,7 @@ void define_dynamic_batch(py::module_& m) {
         .def("set_input_embeddings", &PySearchTask::set_input_embeddings)
         .def("set_position_delta", &PySearchTask::set_position_delta)
         .def("set_logit_bias", &PySearchTask::set_logit_bias)
+        .def("set_session_info", &PySearchTask::set_session_info)
         .def(py::init(&PySearchTask::create));
 
     py::class_<PyBatchGenerator, shared_ptr<PyBatchGenerator>>(m, "BatchGenerator")
@@ -368,6 +382,7 @@ void define_dynamic_batch(py::module_& m) {
         .def("queue_size", &PyBatchGenerator::queue_size)
         .def("active_size", &PyBatchGenerator::active_size)
         .def("submit", &PyBatchGenerator::submit)
+        .def("close_session", &PyBatchGenerator::close_session)
         .def("batch_search", &PyBatchGenerator::batch_search);
 
 }

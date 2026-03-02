@@ -71,6 +71,19 @@ public:
         }
     }
 
+    void init_chunk(const std::vector<TokenT>& input, int len_input, int start_pos) {
+        BM_ASSERT_LE(start_pos + len_input, len_buf, "len_buf isn't big enough, forget call extend_buffer?");
+        BM_ASSERT_LE(len_input, unused_buffer_pos.size(), "unused_buffer_pos.size() is too small");
+        // fill inputs
+        for (int i = 0; i < len_input; i++) {
+            int pos = unused_buffer_pos.back();
+            unused_buffer_pos.pop_back();
+            BM_ASSERT_EQ(start_pos + i, pos, "start_pos not match");
+            buf_local[pos] = BeamBufferInfo<TokenT>(input[i], pos - 1, 0.0, 1);
+        }
+        last_input_buf_pos = start_pos + len_input - 1;
+    }
+
     void reset(int new_len_buf) {
         len_buf = new_len_buf;
         buf_local.clear();
@@ -89,6 +102,9 @@ public:
         int pos = unused_buffer_pos.back();
         unused_buffer_pos.pop_back();
         return pos;
+    }
+    int total_used_pos() {
+        return unused_buffer_pos.empty() ? len_buf : unused_buffer_pos.back();
     }
 
     int place_token(const BeamBufferInfo<TokenT>& token) {
