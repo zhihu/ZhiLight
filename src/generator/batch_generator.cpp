@@ -718,7 +718,22 @@ public:
 
     void end_session();
 
-    void fill_last_hidden_states(const Tensor& e_hidden) {
+    void fill_last_hidden_states(const Tensor& hidden_g) {
+        BM_ASSERT(max_batch_active > 0, "max_batch_active is 0");
+        if (tasks[0]->output_hidden_states == -1) {
+            BM_ASSERT_EQ(max_beam_size, 1, "max_beam_size must be 1 for output_hidden_states");
+        }
+        if (tasks[0]->in_session() && tasks[0]->output_hidden_states == -1) {
+            // output all without cutting
+            BM_ASSERT_EQ(1, max_batch_active, "Session support only batch=1");
+            Tensor hidden_half = functions::typecast(ctx, hidden_g, DataType::kHalf);
+            std::vector<short> v = hidden_half.to_vector<short>(ctx.current_cuda_stream());
+            tasks[0]->dim_model = hidden_g.size(-1);
+            tasks[0]->add_last_hidden_state(std::move(v));
+            return;
+        }
+        Tensor e_hidden = hidden_g.slice_dim0(hidden_g.size(0) - max_beam_size, hidden_g.size(0));
+        // std::cout << "hidden_search: " << hidden_search << std::endl;
         BM_ASSERT_EQ(e_hidden.ndim(), 2L, "e_hidden is not 2-D");
         BM_ASSERT_EQ(e_hidden.shape()[0], max_batch_active, "e_hidden batch mismatch");
         BM_ASSERT_EQ(core::get_elem_size(e_hidden.dtype()), 2, "e_hidden is not half or bf16");
@@ -727,6 +742,7 @@ public:
         for (len_t b = 0; b < max_batch_active; ++b) {
             if (tasks[b] && tasks[b]->output_hidden_states == -1) {
                 std::vector<short> v = e_hidden_half.index_dim0(b).to_vector<short>(ctx.current_cuda_stream());
+                tasks[b]->dim_model = e_hidden_half.size(-1);
                 tasks[b]->add_last_hidden_state(std::move(v));
             }
         }
@@ -1311,6 +1327,7 @@ Tensor SearcherImplV1::join_forward(Tensor* hidden) {
         }
 
         auto md = dynamic_cast<model::LLaMALike*>(searcher->par_models_[i]);
+        vector<Tensor> hidden_states;
         Tensor hidden_g = md->encode(
             ctx1,
             group_token,
@@ -1320,7 +1337,26 @@ Tensor SearcherImplV1::join_forward(Tensor* hidden) {
             ctx1.dyn_batch()->s_mask,
             ctx1.dyn_batch()->s_placement,
             input_embeddings,
-            true);
+            true,
+            tasks[0]->output_hidden_states == -2 ? &hidden_states : nullptr
+        );
+        if (tasks[0]->output_hidden_states == -2) {
+            BM_ASSERT(!hidden_states.empty(), "hidden_states is empty()");
+            BM_ASSERT_EQ(max_batch_active, 1, "output_hidden_states=-2 supports only batch=1");
+            BM_ASSERT_EQ(max_beam_size, 1, "max_beam_size must be 1 for output_hidden_states=-2");
+            if (i == 0) {
+                tasks[0]->dim_model = hidden_g.size(-1);
+                tasks[0]->hidden_states.resize(tasks[0]->hidden_states.size() + 1); // new token
+                tasks[0]->hidden_states.back().clear();
+                tasks[0]->hidden_states.back().reserve(hidden_states.size());
+
+                for (auto& t : hidden_states) {
+                    Tensor t_half = functions::typecast(ctx1, t, DataType::kHalf);
+                    std::vector<short> v = t_half.to_vector<short>(ctx1.current_cuda_stream());
+                    tasks[0]->hidden_states.back().emplace_back(std::move(v));
+                }
+            }
+        }
         BM_ASSERT_EQ(hidden_g.size(0), group_token.size(0), "encode result dim mismatch");
 
         if (dyn_ctx->e_token.numel() == group_token.size(0)) {

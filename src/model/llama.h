@@ -35,7 +35,8 @@ public:
         const core::Tensor& mask,       // int8 (batch, len_q, len_buf)
         const core::Tensor& placement,
         const core::Tensor& hidden_pass, // half (batch, len_q, dim_model)
-        bool ln_output = true) = 0;
+        bool ln_output = true,
+        std::vector<core::Tensor>* hidden_states = nullptr) = 0;
 
     virtual core::Tensor get_input_embeddings(
         ModelContext& ctx, const core::Tensor& ids) = 0;
@@ -89,7 +90,8 @@ private:
         const core::Tensor& mask,       // int8 (batch, len_q, len_buf)
         const core::Tensor& placement,
         const core::Tensor& hidden_pass, // half (batch, len_q, dim_model)
-        bool ln_output = true) override;
+        bool ln_output = true,
+        std::vector<core::Tensor>* hidden_states = nullptr) override;
 
     core::Tensor get_input_embeddings(ModelContext& ctx, const core::Tensor& ids) override;
 

@@ -91,7 +91,7 @@ public:
     }
     void set_input_embeddings(py::array data) {
         auto t = bind::numpy_to_tensor("input_embeddings", data, true);
-        BM_ASSERT(t.dtype() == core::DataType::kFloat || t.dtype() == core::DataType::kHalf, "Invalid input_embeds dtype")
+        BM_ASSERT(t.dtype() == core::DataType::kFloat || t.dtype() == core::DataType::kHalf, "Invalid input_embeds dtype");
         task_->input_embeddings = t;
     }
     void set_logit_bias(std::map<int, float> &bias) {
@@ -139,8 +139,8 @@ public:
         for (int i = 0; i < hiddens.size(); ++i) {
             py::list layer_list;
             for (int j = 0; j < hiddens[i].size(); ++j) {
-                // TODO: set seq_len in shape for encoding hidden_states
-                py::array_t<short> arr({1UL, 1UL, hiddens[i][j].size()}, hiddens[i][j].data());
+                BM_ASSERT_EQ(hiddens[i][j].size() % task_->dim_model, 0, "Wrong hiddens[i][j].size()");
+                py::array_t<short> arr({1UL, hiddens[i][j].size() / task_->dim_model, task_->dim_model}, hiddens[i][j].data());
                 layer_list.append(std::move(arr));
             }
             token_list.append(std::move(layer_list));
