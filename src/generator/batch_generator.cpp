@@ -456,6 +456,8 @@ class SearcherImplV1 {
     len_t max_batch_active { 0 };
     len_t len_buf { 0 };
 
+    int stick_encode { 0 };  // STICK last token during encode, INSTEAD of split it out for fill_search_token.
+    bool stick_encode_1st { false };  // TODO: result missing first token
     int debug_batch { -1 };
     int debug_batch_idx { -1 };
     int batch_idx { 0 };
@@ -519,6 +521,7 @@ public:
           next_tokens(max_batch),
           swapped_buffers(max_batch),
           beam_size(max_beam_size) {
+        stick_encode = utils::get_int_env("STICK_ENCODE");
         debug_level = utils::get_int_env("DYN_BATCH_DEBUG", utils::get_int_env("BM_DEBUG_LEVEL"));
         if (debug_level)
             std::cout << "LWP " << _get_tid() << " DynBatch-Main\n";
@@ -717,6 +720,16 @@ public:
     Tensor join_forward(Tensor* hidden);
 
     void end_session();
+
+    void move_task0();
+
+    void disable_other_tasks() {
+        max_batch_active = 1;
+    }
+
+    bool is_main_node() {
+        return searcher->engine_->node_rank() == 0;
+    }
 
     void fill_last_hidden_states(const Tensor& hidden_g) {
         BM_ASSERT(max_batch_active > 0, "max_batch_active is 0");
@@ -1070,7 +1083,6 @@ len_t SearcherImplV1::advance_chunk(len_t remaining) {
 }
 
 void SearcherImplV1::fill_encode_input(vector<SearchTask>& new_tasks) {
-    bool chunking = in_chunking();
     if (in_chunking()) {
         BM_ASSERT(new_tasks.empty(), "");
         // BM_ASSERT_EQ(chunking_b, max_batch_active, "");
@@ -1112,7 +1124,10 @@ void SearcherImplV1::fill_encode_input(vector<SearchTask>& new_tasks) {
                 std::cout << "Session continue from " << task->sess_chunk_pos << " tokens: " << task->input_tokens << std::endl;
             // cached_len = task->sess_chunk_pos;
         }
-        len_t token_num = tokens.size() - 1;  // Reserve last token for search
+        stick_encode_1st = stick_encode > 0 && max_batch_active == 1 && max_beam_size == 1;
+        // if (stick_encode_1st) std::cout << "Stick encode 1st tokens: " << stick_encode_1st << std::endl;
+        len_t token_num = tokens.size();
+        if (!stick_encode_1st) token_num--;  // Reserve last token for search
         BM_ASSERT_LT(cached_len, token_num, "");
         len_t remaining_len = token_num - cached_len;
 
@@ -1125,6 +1140,8 @@ void SearcherImplV1::fill_encode_input(vector<SearchTask>& new_tasks) {
             } else {
                 bm[b].init(task->input_tokens, int(token_num));
             }
+            if (stick_encode_1st)
+                bm[b].last_input_buf_pos--;
         }
         len_t encode_len = remaining_len;
         if (in_chunking()) {
@@ -1153,8 +1170,11 @@ void SearcherImplV1::fill_encode_input(vector<SearchTask>& new_tasks) {
         h_mask.emplace_back(encode_len * buf_lens[i]);
         bm[b].mask_input(&h_mask[i][0], encode_len, buf_lens[i], cached_len);
         // set last token to search
-        if (!in_chunking())
-            next_tokens[b].emplace_back(tokens[token_num], bm[b].last_input_buf_pos, 0.0, 1);
+        if (!in_chunking()) {
+            int pos = bm[b].last_input_buf_pos;
+            // if (stick_encode_1st) pos--;  // just to keep consistent, pos is unused in stick encode mode anyway
+            next_tokens[b].emplace_back(tokens.back(), pos, 0.0, 1);
+        }
     }
 
     auto set_fn = [&](ModelContext& ctx) {
@@ -1205,14 +1225,18 @@ void SearcherImplV1::save_prompt_cache() {
 void SearcherImplV1::fill_search_tokens(
     Matrix2D<int32_t>& h_placement, Matrix2D<float>& h_prob_prev) {
     len_t batch_active = get_batch_active();
-    if (batch_active == 0) {
-        BM_ASSERT(in_chunking(), "");
+    if (batch_active == 0 || stick_encode_1st) {
+        BM_ASSERT(in_chunking() || stick_encode_1st, "batch_active is 0 while not in_chunking()");
         auto set_fn = [&](ModelContext& ctx) {
             ctx.dyn_batch()->set_search(Tensor(), Tensor(), Tensor(), Tensor(), Tensor());
             ctx.dyn_batch()->sv_len_buf = {};
             ctx.dyn_batch()->s_len_buf = Tensor();
         };
         peer_run([&](int i) { set_fn(*peer_ctx[i]); }, true); // prepare dyn_batch search
+        if (stick_encode_1st) {
+            h_placement(0, 0) = bm[0].last_input_buf_pos;  // place in buffer
+            h_prob_prev(0, 0) = 0.f;
+        }
         return;
     }
     BM_ASSERT(batch_active > 0, "");
@@ -1261,6 +1285,12 @@ void SearcherImplV1::fill_search_tokens(
             rag_buf_lens.push_back(len_buffer);
             rag_mask.emplace_back(len_q * len_buffer);
             bm[b].mask_hypotheses(&h_placement(b, 0), hyp_num, &rag_mask[b][0]);
+            if (tasks[b]->sess_chunk_pos > 0 && tasks[b]->input_length() == 1 && steps[b] == 0) {
+                BM_ASSERT_EQ(h_placement(b, 0), tasks[b]->sess_chunk_pos, "Wrong position");
+                for (int i = 0; i < len_buffer; i++) {
+                    BM_ASSERT_EQ(rag_mask[b][i], int(i <= tasks[b]->sess_chunk_pos), "mask wrong");
+                }
+            }
             if (ctx.is_BSHD() && hyp_num > 0) {
                 int input_len = int(tasks[b]->input_tokens.size()) + steps[b];
                 sum_q += hyp_num;
@@ -1319,8 +1349,9 @@ Tensor SearcherImplV1::join_forward(Tensor* hidden) {
 
         Tensor input_embeddings;
         Tensor& task0_emb = tasks[0]->input_embeddings;
-        if (!task0_emb.empty() && !dyn_ctx->e_token.empty()) {
-            BM_ASSERT_EQ(1, dyn_ctx->s_token.numel(), "Feed embedding decode tasks[0] only");
+        if (!task0_emb.empty() && steps[0] == 0) {
+            if (stick_encode == 0)
+                BM_ASSERT_EQ(1, dyn_ctx->s_token.numel(), "Feed embedding decode tasks[0] only");
             BM_ASSERT_EQ(group_token.size(0), task0_emb.size(0), "Feed embedding decode tasks[0] only");
             input_embeddings = ctx1.tensor(task0_emb.shape(), task0_emb.dtype());
             ctx1.assign_or_copy(&input_embeddings, &task0_emb);
@@ -1359,14 +1390,19 @@ Tensor SearcherImplV1::join_forward(Tensor* hidden) {
         }
         BM_ASSERT_EQ(hidden_g.size(0), group_token.size(0), "encode result dim mismatch");
 
-        if (dyn_ctx->e_token.numel() == group_token.size(0)) {
+        if (dyn_ctx->e_token.numel() == group_token.size(0) && !stick_encode_1st) {
             // Only chunking, no search tokens. Keep logits_all as empty Tensor()
             BM_ASSERT(in_chunking(), "");
         } else {
             // cut out encoding
-            Tensor hidden_search = hidden_g.slice_dim0(dyn_ctx->e_token.numel(), group_token.size(0));
+            size_t search_start = dyn_ctx->e_token.numel();
+            if (stick_encode_1st) {
+                BM_ASSERT_EQ(dyn_ctx->e_token.numel(), group_token.size(0), "group_token number is wrong when stick encode");
+                search_start--;
+            }
+            Tensor hidden_search = hidden_g.slice_dim0(search_start, group_token.size(0));
             // std::cout << "hidden_search: " << hidden_search << std::endl;
-            if (i == 0) *hidden = hidden_search;
+            if (i == 0) *hidden = hidden_g;
 
             Tensor logits = md->get_logits(ctx1, hidden_search, false);
 
@@ -1392,6 +1428,19 @@ void SearcherImplV1::end_session() {
     pad_task();
 }
 
+// Move out task 0, make slot 0 for feed input_embeddings task
+void SearcherImplV1::move_task0() {
+    BM_ASSERT(searcher->engine_->nnodes() == 1, "feed_input_embedding only support single node, now");
+    const len_t b = assign_free_slot(tasks[0]);
+    if (debug_level) std::cout << "Move task 0 to " << b << endl;
+    move_task(b, 0); // move tasks[0] to b
+    BM_ASSERT(!tasks[0], "Feed input_embeddings need put task at index=0");
+    // TODO: if we want support batching while feed embeddings,
+    //   we need lookup embeddings for other tasks and concat with new task's input embeds.
+    disable_other_tasks();  // disable other tasks temporarily
+    // max_batch_active = std::max(b + 1, max_batch_active);
+}
+
 void SearcherImplV1::batch_search() {
     int active_count = 0;
 
@@ -1405,7 +1454,7 @@ void SearcherImplV1::batch_search() {
             active_count = max_batch_active;
         }
         searcher->active_size_ = active_count;
-        if (searcher->engine_->node_rank() == 0 && active_count == 0 && searcher->queue_.size() == 0) {
+        if (is_main_node() && active_count == 0 && searcher->queue_.size() == 0) {
             searcher->done_cond_.notify_all();
         }
         int max_total_token;
@@ -1421,7 +1470,7 @@ void SearcherImplV1::batch_search() {
                 ctx.use_cache_alloc(false);
             }
             int limit = 1; // dual_stream ? 1 : max_batch - active_count;
-            if (searcher->engine_->node_rank() == 0) {
+            if (is_main_node()) {
                 new_tasks = searcher->queue_.pop_multi(
                     limit, active_count == 0, 1, max_total_token, pre_alloc);
                 for (auto task: new_tasks) {
@@ -1460,17 +1509,12 @@ void SearcherImplV1::batch_search() {
         }
         bool feed_input_embedding = !new_tasks.empty() && !new_tasks[0]->input_embeddings.empty();
         if (feed_input_embedding && tasks[0]) {
-            BM_ASSERT(searcher->engine_->nnodes() == 1, "feed_input_embedding only support single node, now");
-            int b = assign_free_slot(tasks[0]);
-            if (debug_level) std::cout << "Move task 0 to " << b << endl;
-            if (b != 0)
-                move_task(b, 0); // move tasks[0] to b
-            BM_ASSERT(!tasks[0], "Feed input_embeddings need put task at index=0");
+            move_task0();
         }
 
         /** -------------------------- Fill Encode Input -------------------------- **/
         if (!new_tasks.empty() || in_chunking()) {
-            if (new_tasks[0]->input_length() > 1) {
+            if (new_tasks[0]->input_length() > 1 || stick_encode > 0) {
                 fill_encode_input(new_tasks); // update max_batch_active in init_slot()
             } else {
                 BM_ASSERT(new_tasks[0]->session_continue, "input_length is 1 in non-session mode");
@@ -1483,7 +1527,7 @@ void SearcherImplV1::batch_search() {
         max_beam_size = calc_max_beam_size(tasks, 1);
 
         /** -------------------------- Fill Next Search --------------------------- **/
-        if (feed_input_embedding) max_batch_active = 1;
+        if (feed_input_embedding) disable_other_tasks();  // disable other tasks temporarily
         if (in_chunking()) max_batch_active = chunking_b;
         Matrix2D<int32_t> h_placement(max_batch_active, max_beam_size, -1); // pos in buffer
         Matrix2D<float> h_prob_prev(max_batch_active, max_beam_size, -50000);
@@ -1492,7 +1536,8 @@ void SearcherImplV1::batch_search() {
         /** -------------------------- Get Search Logits --------------------------- **/
         Tensor hidden;
         Tensor logits_all = join_forward(&hidden);
-        fill_last_hidden_states(hidden);
+        if (!hidden.empty() && max_batch_active > 0)
+            fill_last_hidden_states(hidden);
         ctx.check_numeric(logits_all);
         if (config.enable_prompt_caching) {
             save_prompt_cache();
@@ -1500,14 +1545,16 @@ void SearcherImplV1::batch_search() {
 
         if (logits_all.numel() == 0) {
             BM_ASSERT(in_chunking(), "");
-            max_batch_active = 1;
+            disable_other_tasks();
             continue; // no other tasks, goto next chunk directly
         }
 
         size_t logits_dim = searcher->model_->vocab_size;
         logits_all = logits_all.view({max_batch_active, max_beam_size, logits_dim });
-        if (hidden.numel())
+        if (hidden.numel()) {
+            hidden = hidden.slice_dim0(hidden.size(0) - max_batch_active * max_beam_size, hidden.size(0));
             hidden = hidden.view({max_batch_active, max_beam_size, hidden.size(-1) });
+        }
 
         /** ------------------------------ Pick top k ------------------------------- **/
         pick_top_k(logits_all, hidden, h_placement, h_prob_prev);
@@ -1543,7 +1590,7 @@ void SearcherImplV1::batch_search() {
                 SearchResults results{};
                 results.results = result_mgr[b].get_search_results(num);
                 results.first_token_delay_ms = tasks[b]->first_token_delay_ms;
-                if (searcher->engine_->node_rank() == 0) {
+                if (is_main_node()) {
                     tasks[b]->finish(std::move(results));
                 }
                 tasks[b].reset();
@@ -1584,6 +1631,7 @@ void SearcherImplV1::batch_search() {
                 } while (!tasks[e]);
             }
         }
+        stick_encode_1st = false;
     }
 }
 
@@ -1694,7 +1742,7 @@ void SearcherImplV1::update_stream(
         // increasingly update
         if (word_id != config.eos_id) {
             stream_res[b].stream.append(word_id);
-            if (searcher->engine_->node_rank() == 0) {
+            if (is_main_node()) {
                 tasks[b]->update_stream(stream_res[b]);
             }
         }
@@ -1704,7 +1752,7 @@ void SearcherImplV1::update_stream(
         auto tmp_res = bm[b].get_hypo_tokens(word_id, is_eos, last_hypo_pos);
         BM_ASSERT(tmp_res.size() > 0, "No results");
         stream_res[b].stream.update(std::move(tmp_res), t);
-        if (searcher->engine_->node_rank() == 0) {
+        if (is_main_node()) {
             tasks[b]->update_stream(stream_res[b]);
         }
     }
