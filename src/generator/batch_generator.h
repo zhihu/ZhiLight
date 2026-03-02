@@ -64,6 +64,7 @@ struct SearchTask_ {
     int sess_chunk_pos { 0 };
 
     // results
+    size_t dim_model { 1 };
     vector<vector<vector<short>>> hidden_states;  // index 0: prompt? + decoded tokens; 1: layers
 
 #ifdef ENABLE_DIST_INFER
