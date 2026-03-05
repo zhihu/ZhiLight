@@ -98,11 +98,12 @@ public:
         task_->logit_bias = bias;
     }
 
-    void set_session_info(const std::string& session_id, bool session_continue, int sess_chunk_pos) {
+    void set_session_info(const std::string& session_id, bool session_continue, int chunk_pos, int drop_num) {
         // std::cout << "Session:" << session_id << ", continue=" << session_continue << ", chunkPos=" << sess_chunk_pos << std::endl;
         task_->session_id = session_id;
         task_->session_continue = session_continue;
-        task_->sess_chunk_pos = sess_chunk_pos;
+        task_->sess_chunk_pos = chunk_pos;
+        task_->sess_drop_speculative = drop_num;
     }
 
     generator::SearchResults pop_res(float timeout) {

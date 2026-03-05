@@ -840,7 +840,7 @@ public:
             // individual len_buf
             len_t filled_len = 0;
             if (task->in_session()) {
-                BM_ASSERT_EQ(task->sess_chunk_pos, bm[b].total_used_pos(), "Wrong session chunk position");
+                BM_ASSERT_EQ(task->sess_chunk_pos, bm[b].total_used_pos() - task->sess_drop_speculative, "Wrong session chunk position");
                 filled_len = task->sess_chunk_pos;
             }
             len_t new_len_buf = round_up_len(filled_len + task->input_length() + 2, INCR_SIZE);
@@ -849,6 +849,7 @@ public:
                     // std::cout << "extend_buffer from " << bm[b].len_buf << " to " << new_len_buf << std::endl;
                     bm[b].extend_buffer(new_len_buf - bm[b].len_buf);
                 }
+                bm[b].drop_token(task->sess_drop_speculative, task->sess_chunk_pos);
             } else {
                 bm[b].reset(new_len_buf);
             }
