@@ -130,16 +130,19 @@ class GeneratorArg:
         self.session_id = None
         self.session_continue = False
         self.sess_chunk_pos = 0
+        self.sess_drop_speculative = 0
 
     def set_session_info(
         self,
         session_id: str,
         session_continue: bool = False,
         sess_chunk_pos: int = 0,
+        sess_drop_speculative: int = 0,
     ):
         self.session_id = session_id
         self.session_continue = session_continue
         self.sess_chunk_pos = sess_chunk_pos
+        self.sess_drop_speculative = sess_drop_speculative
 
     def copy(self, **kwargs):
         obj = type(self).__new__(self.__class__)
@@ -440,7 +443,7 @@ class DynamicBatchGenerator:
         if arg.logit_bias is not None:
             task.set_logit_bias(arg.logit_bias)
         if arg.session_id is not None:
-            task.set_session_info(arg.session_id, arg.session_continue, arg.sess_chunk_pos)
+            task.set_session_info(arg.session_id, arg.session_continue, arg.sess_chunk_pos, arg.sess_drop_speculative)
         return task
 
     def check_queue_busy(self):

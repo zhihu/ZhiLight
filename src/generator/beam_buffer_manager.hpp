@@ -84,6 +84,16 @@ public:
         last_input_buf_pos = start_pos + len_input - 1;
     }
 
+    void drop_token(int num, int remaining) {
+        if (num == 0) return;
+        int pos = remaining + num;
+        // Drop ‘num' tokens. i.e. used buffer: [remaining + num] -> [remaining]
+        BM_ASSERT_EQ(pos, unused_buffer_pos.back(), "Wrong allocated position number.");
+        for (int i = 0; i < num; i++) {
+            unused_buffer_pos.push_back(--pos);
+        }
+    }
+
     void reset(int new_len_buf) {
         len_buf = new_len_buf;
         buf_local.clear();

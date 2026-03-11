@@ -62,6 +62,7 @@ struct SearchTask_ {
     bool session_continue { false };
     bool session_end { false };
     int sess_chunk_pos { 0 };
+    int sess_drop_speculative { 0 };
 
     // results
     size_t dim_model { 1 };

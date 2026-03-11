@@ -1,3 +1,4 @@
+import logging
 import numpy as np
 import time
 import torch
@@ -19,6 +20,7 @@ class SessionGenerator(object):
         self._session_id = f"sess_{time.time():.3f}"
         self._chunk_pos = 0
         self._first_chunk = True
+        self._drop_speculative = 0
 
     def feed(
             self,
@@ -42,9 +44,11 @@ class SessionGenerator(object):
             output_hidden_states=-1)
         arg.set_session_info(session_id=self._session_id,
                              session_continue=not self._first_chunk,
-                             sess_chunk_pos=self._chunk_pos)
+                             sess_chunk_pos=self._chunk_pos,
+                             sess_drop_speculative=self._drop_speculative)
         self._chunk_pos += num_tokens
         self._first_chunk = False
+        self._drop_speculative = 0
 
         c_task = self._impl.to_c_task(input_ids, arg=arg)
         if input_embeddings is not None:
@@ -53,6 +57,13 @@ class SessionGenerator(object):
         req_out = self._impl.generate_c(c_task, arg)
 
         return req_out
+
+    def rollback_speculative(self, num_tokens):
+        if self._drop_speculative:
+            logging.warning(
+                f"SessionGenerator rollback while _drop_speculative={self._drop_speculative} > 0")
+        self._drop_speculative += num_tokens
+        self._chunk_pos -= num_tokens
 
     def close(self):
         self._c_generator.close_session(self._session_id)
