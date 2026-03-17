@@ -965,7 +965,8 @@ core::Tensor gptq_gemm_k_major(
     const core::Tensor* bias,
     bool sym,
     bool cache_only,
-    core::Tensor* output
+    core::Tensor* output,
+    const core::Tensor* precomputed_w8
 ) {
     const size_t K = a.size(-1);
     const size_t M = a.numel() / K;
@@ -1005,11 +1006,16 @@ core::Tensor gptq_gemm_k_major(
         static int MAX_ACT_E4M3 = utils::get_int_env("MAX_ACT_E4M3", 448);
         core::EventScope event_scope(ctx, name_fp8, ev_level);
         BM_ASSERT(q_weight.quant_scale, "");
-        if (m_ctx->layer_cache().count(name_fp8) == 0) {
+        core::Tensor w8;
+        if (precomputed_w8 && precomputed_w8->numel()) {
+            w8 = *precomputed_w8;
+        } else if (m_ctx->layer_cache().count(name_fp8) == 0) {
             m_ctx->layer_cache()[name_fp8] = dequant_k_major(ctx, q_weight, qzeros, scales, 2);
             if (cache_only) return core::Tensor();
+            w8 = m_ctx->layer_cache()[name_fp8];
+        } else {
+            w8 = m_ctx->layer_cache()[name_fp8];
         }
-        core::Tensor w8 = m_ctx->layer_cache()[name_fp8];
 
         // quant a
         core::Tensor a_quant; // (M, K)
@@ -1038,11 +1044,16 @@ core::Tensor gptq_gemm_k_major(
     if (w4_int8 && (M > a8_thres || m_ctx->dual_stream() && m_ctx->layer_cache().count(name_int8)) && !bias && N > 1024 && !skip) {
         // core::EventScope event_scope(ctx, name_int8, cache_only ? 100 : ev_level);
         BM_ASSERT(q_weight.quant_scale, "");
-        if (m_ctx->layer_cache().count(name_int8) == 0) {
+        core::Tensor w8;
+        if (precomputed_w8 && precomputed_w8->numel()) {
+            w8 = *precomputed_w8;
+        } else if (m_ctx->layer_cache().count(name_int8) == 0) {
             m_ctx->layer_cache()[name_int8] = dequant_k_major(ctx, q_weight, qzeros, scales, 1);
             if (cache_only) return core::Tensor();
+            w8 = m_ctx->layer_cache()[name_int8];
+        } else {
+            w8 = m_ctx->layer_cache()[name_int8];
         }
-        core::Tensor w8 = m_ctx->layer_cache()[name_int8];
         auto s_scales = q_weight.quant_scale;
 
         // quant a
