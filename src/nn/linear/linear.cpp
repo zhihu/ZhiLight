@@ -662,6 +662,7 @@ public:
     int w4_int8;
     int w4_fp8;
     bool loaded { false };
+    core::Tensor w8_weight;  // optional pre-computed w8 when W4A8_LOAD_CACHE_W8=1
 
     Int4GPTQ(
         const core::Context& ctx,
@@ -713,7 +714,7 @@ public:
     }
 
     void clear_weights() {
-        qweight = scales = qzeros = g_idx = Tensor();
+        qweight = scales = qzeros = g_idx = w8_weight = Tensor();
     }
 
     static impl* fuse_dim0(const core::Context& ctx, const std::vector<impl*>& layers) {
@@ -812,6 +813,8 @@ public:
                 ret->q_perm_i16 = concat2_dim0(ctx, a.q_perm_i16, b.q_perm_i16);
                 ret->rev_perm = concat2_dim0(ctx, a.rev_perm, b.rev_perm); // TODO: check this
             }
+            if (a.w8_weight.numel() && b.w8_weight.numel())
+                ret->w8_weight = concat2_dim0(ctx, a.w8_weight, b.w8_weight);
             ret->qweight.set_name(a.qweight.name() + "[FUSED]");
         } else {
             ret->qweight = concat2_dim1(ctx, a.qweight, b.qweight);
@@ -842,6 +845,8 @@ public:
             ret->qweight = concat3_dim0(ctx, q.qweight, k.qweight, v.qweight);
             ret->qzeros = concat3_dim0(ctx, q.qzeros, k.qzeros, v.qzeros);
             ret->scales = concat3_dim0(ctx, q.scales, k.scales, v.scales);
+            if (q.w8_weight.numel() && k.w8_weight.numel() && v.w8_weight.numel())
+                ret->w8_weight = concat3_dim0(ctx, q.w8_weight, k.w8_weight, v.w8_weight);
             ret->qweight.set_name(q.qweight.name() + "kv[FUSED]");
         } else {
             ret->qweight = concat3_dim1(ctx, q.qweight, k.qweight, v.qweight);
@@ -915,8 +920,10 @@ public:
 
     void dequant_cache_weight(ModelContext& ctx, const core::Tensor& fake_input) {
         if (new_kernel && use_exllama && !trt_kernel) {
+            const Tensor* w8_ptr = w8_weight.numel() ? &w8_weight : nullptr;
             nn::gptq::gptq_gemm_k_major(
-                ctx, fake_input, qweight, qzeros, scales, q_perm_i16, rev_perm, has_bias ? &bias : nullptr, sym, true);
+                ctx, fake_input, qweight, qzeros, scales, q_perm_i16, rev_perm, has_bias ? &bias : nullptr, sym, true,
+                nullptr, w8_ptr);
         }
     }
 
@@ -947,6 +954,7 @@ public:
             size_t K = input.size(-1);
             uint32_t N = qweight.size(0);
             Tensor* bias_p = has_bias ? &bias : nullptr;
+            const Tensor* w8_ptr = w8_weight.numel() ? &w8_weight : nullptr;
 
             if (w4_a8_enc_only && !skip_int8 && !has_bias && dyn_ctx->s_token.numel() && size_legal) {
                 Tensor ret = ctx.tensor({input.size(0), N}, input.dtype());
@@ -960,19 +968,19 @@ public:
                 ctx.recordEvent("Start>gemm_w16_decode", 2);
                 m_ctx->set_dual_stream(false);
                 Tensor ret1 = nn::gptq::gptq_gemm_k_major(
-                    ctx, input_s, qweight, qzeros, scales, q_perm_i16, rev_perm, bias_p, sym, false, &ret_s);
+                    ctx, input_s, qweight, qzeros, scales, q_perm_i16, rev_perm, bias_p, sym, false, &ret_s, w8_ptr);
                 BM_ASSERT_EQ(ret1.data<char>(), ret_s.data<char>(), "");
                 ctx.recordEvent("End>gemm_w16_decode", 2);
                 // W4A8 gemm encode
                 m_ctx->set_dual_stream(dual_stream);
                 Tensor ret2 = nn::gptq::gptq_gemm_k_major(
-                    ctx, input_e, qweight, qzeros, scales, q_perm_i16, rev_perm, bias_p, sym, false, &ret_e);
+                    ctx, input_e, qweight, qzeros, scales, q_perm_i16, rev_perm, bias_p, sym, false, &ret_e, w8_ptr);
                 BM_ASSERT_EQ(ret2.data<char>(), ret_e.data<char>(), "");
                 return activate(ctx, ret);
             } else {
                 core::Tensor ret = ctx.tensor({input.size(0), N}, input.dtype());
                 ret = nn::gptq::gptq_gemm_k_major(
-                    ctx, input, qweight, qzeros, scales, q_perm_i16, rev_perm, bias_p, sym, false, &ret);
+                    ctx, input, qweight, qzeros, scales, q_perm_i16, rev_perm, bias_p, sym, false, &ret, w8_ptr);
                 BM_ASSERT(ret.numel(), "");
                 return activate(ctx, ret);
             }
@@ -1091,6 +1099,7 @@ public:
     }
 
     void calc_w4a8_scale(const core::Context& ctx) {
+        static int save_w8 = utils::get_int_env("W4A8_LOAD_CACHE_W8", 0);
         if (w4_int8 >= 1) {
             Tensor w16 = nn::gptq::dequant_k_major(ctx, qweight, qzeros, scales);
             Tensor w_max = functions::reduce_abs_max(ctx, w16, 1);
@@ -1099,6 +1108,9 @@ public:
             functions::BinaryElementwiseOp div_op(ctx, functions::BinaryElementwiseOp::Div);
             Tensor q_scales = div_op.forward(ctx, w_max, q_max);
             int8_op::set_quant_scale(qweight, q_scales);
+            if (save_w8) {
+                w8_weight = nn::gptq::dequant_k_major(ctx, qweight, qzeros, scales, 1);
+            }
             if (ctx.rank() == 110 && prefix.find("project_k") != std::string::npos) {
                 auto w8 = nn::gptq::dequant_k_major(ctx, qweight, qzeros, scales, 1);
                 std::cout << "w_max: " << w_max << endl;
@@ -1113,11 +1125,14 @@ public:
             Tensor w16 = nn::gptq::dequant_k_major(ctx, qweight, qzeros, scales);
             static int MAX_WEIGHT_E4M3 = utils::get_int_env("MAX_WEIGHT_E4M3", 256); // 448
             Tensor fp8_scale = nn::fp8::calc_scale(ctx, w16, (float)MAX_WEIGHT_E4M3); // shape: (1) type: float
+            int8_op::set_quant_scale(qweight, fp8_scale);
+            if (save_w8) {
+                w8_weight = nn::gptq::dequant_k_major(ctx, qweight, qzeros, scales, 2);
+            }
             if (ctx.rank() == 0 && ctx.current_layer() == 0 && prefix.find("project_k") != std::string::npos) {
                 auto w8 = nn::gptq::dequant_k_major(ctx, qweight, qzeros, scales, 1);
                 std::cout << "fp8_scale: " << fp8_scale << endl;
             }
-            int8_op::set_quant_scale(qweight, fp8_scale);
         }
     }
 

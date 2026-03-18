@@ -90,7 +90,8 @@ core::Tensor gptq_gemm_k_major(
     const core::Tensor* bias,
     bool sym,
     bool cache_only = false,
-    core::Tensor* output = nullptr
+    core::Tensor* output = nullptr,
+    const core::Tensor* precomputed_w8 = nullptr
 );
 
 core::Tensor gemm_fuse_gate_in(
